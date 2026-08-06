@@ -757,7 +757,7 @@ agent_turn_openai() {
 
 agent_turn() {
   local user_text=$1 turn text call_count user_message assistant_content
-  TURN_MODEL=$MODEL
+  [[ -n "$TURN_MODEL" ]] || TURN_MODEL=$MODEL
   if [[ "$PROVIDER" == "openai" ]]; then agent_turn_openai "$user_text"; return; fi
   user_message=$(printf '%s' "$user_text" | "$JQ_BIN" -Rsc '{role:"user",content:.}')
   HISTORY=$("$JQ_BIN" -cs '.[0] + [.[1]]' \
@@ -846,7 +846,7 @@ interactive_loop() {
       /help) interactive_help ;;
       /compact) if compact_history; then printf 'context compacted\n'; else printf 'compaction failed\n' >&2; fi ;;
       /status) print_status ;;
-      /clear) HISTORY='[]'; TURN_MODEL=""; OPENAI_PREVIOUS_RESPONSE_ID=""; OPENAI_NEEDS_RESTART=0; CONTEXT_TOKENS=0; CONTEXT_TOKENS_KNOWN=0; printf 'history cleared\n' ;;
+      /clear) HISTORY='[]'; OPENAI_PREVIOUS_RESPONSE_ID=""; OPENAI_NEEDS_RESTART=0; CONTEXT_TOKENS=0; CONTEXT_TOKENS_KNOWN=0; printf 'history cleared\n' ;;
       /model\ *) value=${line#* }; MODEL=$value; TURN_MODEL=""; HISTORY='[]'; OPENAI_PREVIOUS_RESPONSE_ID=""; OPENAI_NEEDS_RESTART=0; CONTEXT_TOKENS=0; CONTEXT_TOKENS_KNOWN=0; printf 'model: %s (history cleared)\n' "$MODEL" ;;
       /provider\ *) value=${line#* }; PROVIDER=$value; MODEL=""; FALLBACK_MODEL=""; TURN_MODEL=""; HISTORY='[]'; OPENAI_PREVIOUS_RESPONSE_ID=""; OPENAI_NEEDS_RESTART=0; CONTEXT_TOKENS=0; CONTEXT_TOKENS_KNOWN=0; select_provider; printf 'provider: %s, model: %s (history cleared)\n' "$PROVIDER" "$MODEL" ;;
       /reasoning\ *) value=${line#* }; REASONING=$value; case "$REASONING" in default|none|minimal|low|medium|high|xhigh|max) printf 'reasoning: %s\n' "$REASONING" ;; *) printf 'invalid reasoning level\n'; REASONING="medium" ;; esac ;;

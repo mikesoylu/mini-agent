@@ -131,6 +131,11 @@ out=$(ANTHROPIC_API_KEY=test MOCK_REFUSE_MODEL=claude-fable-5 MOCK_TRACE="$TMP/a
 assert_contains "$out" "anthropic done" "Anthropic retries stop_reason refusal"
 assert_equal "$(cut -f1 "$TMP/anthropic-fallback.trace" | paste -sd, -)" "claude-fable-5,claude-sonnet-5,claude-sonnet-5" "Anthropic pins configured fallback for the turn"
 
+: > "$TMP/anthropic-session-fallback.trace"
+out=$(printf 'second request\n/clear\nthird request\n/quit\n' | ANTHROPIC_API_KEY=test MOCK_REFUSE_MODEL=claude-fable-5 MOCK_TRACE="$TMP/anthropic-session-fallback.trace" CURL_BIN="$TMP/curl" "$ROOT/mini-agent.sh" -q -i -p anthropic -m claude-fable-5 --fallback-model claude-sonnet-5 -C "$TMP" "first request")
+assert_contains "$out" "anthropic done" "Anthropic interactive session continues after fallback"
+assert_equal "$(cut -f1 "$TMP/anthropic-session-fallback.trace" | paste -sd, -)" "claude-fable-5,claude-sonnet-5,claude-sonnet-5,claude-sonnet-5,claude-sonnet-5,claude-sonnet-5" "Anthropic keeps fallback for subsequent messages and /clear"
+
 : > "$TMP/openrouter-fallback.trace"
 out=$(OPENROUTER_API_KEY=test MOCK_REFUSE_MODEL=openai/gpt-5.6-sol MOCK_TRACE="$TMP/openrouter-fallback.trace" CURL_BIN="$TMP/curl" "$ROOT/mini-agent.sh" -q -p openrouter -C "$TMP" "inspect")
 assert_contains "$out" "openai done" "OpenRouter retries a content-filter refusal"
