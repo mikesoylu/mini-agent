@@ -1,6 +1,18 @@
 # miniagent.sh
 
-A deliberately small coding-agent harness inspired by mini-swe-agent. It is a single Bash script with no package installation step, built for GitHub Actions, CI/CD pipelines, remote SSH sessions, and similar headless environments. It works with OpenAI, Anthropic, and OpenRouter.
+A single Bash script agent harness with minimal dependencies. Built for GitHub Actions, CI/CD pipelines, remote SSH sessions, and similar headless environments. It works with OpenAI, Anthropic, and OpenRouter.
+
+Run an agent loop directly without installing:
+
+```bash
+curl -fsSL https://miniagent.sh | bash -s -- "Explain this repository"
+```
+
+Or run interactively:
+
+```bash
+curl -fsSL https://miniagent.sh | bash
+```
 
 ## Features
 
@@ -22,16 +34,6 @@ A deliberately small coding-agent harness inspired by mini-swe-agent. It is a si
 - Optional: `file` for MIME detection, `strings` for extracting text from unknown binary files, and GNU `timeout` (or `gtimeout`) to enforce command timeouts
 
 ## Install
-
-Run it directly without installing:
-
-```bash
-curl -fsSL https://miniagent.sh | bash -s -- "Explain this repository"
-```
-
-If `jq` is missing, the harness downloads a prebuilt copy to the user cache and continues without installing itself or requiring `sudo`.
-
-Or install it as `miniagent`:
 
 ```bash
 curl -fsSL https://miniagent.sh/install | bash
