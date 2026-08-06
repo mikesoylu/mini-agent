@@ -1,6 +1,6 @@
 # miniagent.sh
 
-A deliberately small coding-agent harness inspired by mini-swe-agent. It is a single Bash script with no package installation step, built for GitHub Actions, CI/CD pipelines, remote SSH sessions, and similar headless environments. It works with OpenAI, Anthropic, and OpenRouter, and can get started without an API key through the free public proxy at `miniagent.sh`.
+A deliberately small coding-agent harness inspired by mini-swe-agent. It is a single Bash script with no package installation step, built for GitHub Actions, CI/CD pipelines, remote SSH sessions, and similar headless environments. It works with OpenAI, Anthropic, and OpenRouter.
 
 ## Features
 
@@ -32,12 +32,10 @@ curl -fsSL https://miniagent.sh | bash -s -- "Explain this repository"
 Or install it as `miniagent`:
 
 ```bash
-mkdir -p "$HOME/.local/bin"
-curl -fsSL https://miniagent.sh -o "$HOME/.local/bin/miniagent"
-chmod +x "$HOME/.local/bin/miniagent"
+curl -fsSL https://miniagent.sh/install | bash
 ```
 
-Make sure `~/.local/bin` is on your `PATH`. The requirements above must already be available.
+The installer detects macOS or Linux, installs missing requirements with the available package manager, and places `miniagent` in `~/.local/bin`.
 
 ## Quick start
 
@@ -45,7 +43,7 @@ Make sure `~/.local/bin` is on your `PATH`. The requirements above must already 
 miniagent "Find and fix the failing tests"
 ```
 
-No API key is required. To use your own provider, set `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or `OPENROUTER_API_KEY`.
+If you have not configured a provider key, miniagent uses the public fallback. Set `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or `OPENROUTER_API_KEY` to use your own provider directly.
 
 ## Usage
 

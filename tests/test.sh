@@ -329,6 +329,13 @@ assert_contains "$help" "default: 262144" "Help shows default compaction thresho
 assert_contains "$help" "--fallback-model" "Help shows fallback model option"
 assert_contains "$help" "--debug" "Help shows debug option"
 
+MINIAGENT_SCRIPT_URL="file://$ROOT/miniagent.sh" \
+  MINIAGENT_INSTALL_DIR="$TMP/install-bin" \
+  MINIAGENT_SKIP_DEPENDENCY_INSTALL=1 \
+  bash "$ROOT/install.sh" >/dev/null 2>&1
+if [[ -x "$TMP/install-bin/miniagent" ]]; then ok "Installer creates an executable"; else not_ok "Installer creates an executable"; fi
+assert_equal "$(cmp -s "$ROOT/miniagent.sh" "$TMP/install-bin/miniagent"; printf '%s' "$?")" "0" "Installer downloads the harness"
+
 source "$ROOT/miniagent.sh"
 assert_equal "$MAX_TURNS" "1024" "Default maximum turns"
 assert_equal "$COMPACT_TOKENS" "262144" "Default compaction threshold"
@@ -403,6 +410,7 @@ assert_equal "$CONTEXT_TOKENS" "0" "Compaction resets context usage"
 assert_equal "$CONTEXT_TOKENS_KNOWN" "0" "Compaction marks context usage unknown until the next response"
 
 if bash -n "$ROOT/miniagent.sh"; then ok "Bash syntax"; else not_ok "Bash syntax"; fi
+if bash -n "$ROOT/install.sh"; then ok "Installer syntax"; else not_ok "Installer syntax"; fi
 
 printf '\n%s passed, %s failed\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]
