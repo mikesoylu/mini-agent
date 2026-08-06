@@ -12,6 +12,7 @@ MAX_TOKENS="${MINI_AGENT_MAX_TOKENS:-32768}"
 COMPACT_TOKENS="${MINI_AGENT_COMPACT_TOKENS:-262144}"
 COMPACT_MAX_TOKENS="${MINI_AGENT_COMPACT_MAX_TOKENS:-13107}"
 MAX_TOOL_OUTPUT="${MINI_AGENT_MAX_TOOL_OUTPUT:-30000}"
+MAX_IMAGE_BYTES=1048576
 TOOL_TIMEOUT="${MINI_AGENT_TOOL_TIMEOUT:-120}"
 API_TIMEOUT="${MINI_AGENT_API_TIMEOUT:-600}"
 WORKDIR="${MINI_AGENT_WORKDIR:-$PWD}"
@@ -281,7 +282,7 @@ PROMPT_EOF
 }
 tools_compatible() {
   "$JQ_BIN" -cn '[
-    {type:"function",function:{name:"read",description:"Read a text file, attach an image, or list a directory.",parameters:{type:"object",properties:{path:{type:"string",description:"Absolute path or path relative to the working directory"},offset:{type:"integer",minimum:1,description:"First line to read (default 1)"},limit:{type:"integer",minimum:1,maximum:2000,description:"Maximum lines or directory entries (default 250)"}},required:["path"],additionalProperties:false}}},
+    {type:"function",function:{name:"read",description:"Read a text file, attach an image no larger than 1 MiB, or list a directory.",parameters:{type:"object",properties:{path:{type:"string",description:"Absolute path or path relative to the working directory"},offset:{type:"integer",minimum:1,description:"First line to read (default 1)"},limit:{type:"integer",minimum:1,maximum:2000,description:"Maximum lines or directory entries (default 250)"}},required:["path"],additionalProperties:false}}},
     {type:"function",function:{name:"shell",description:"Run a shell command in the working directory. Use for searching, editing files, building, and testing.",parameters:{type:"object",properties:{command:{type:"string",description:"Shell command to execute through Bash"}},required:["command"],additionalProperties:false}}}
   ]'
 }
@@ -624,7 +625,7 @@ number_lines() {
 }
 
 read_file() {
-  local requested=$1 offset=${2:-1} limit=${3:-250} path mime text
+  local requested=$1 offset=${2:-1} limit=${3:-250} path mime text size
   [[ "$offset" =~ ^[1-9][0-9]*$ ]] || offset=1
   [[ "$limit" =~ ^[1-9][0-9]*$ ]] || limit=250
   [[ "$limit" -gt 2000 ]] && limit=2000
@@ -639,6 +640,12 @@ read_file() {
   mime=$(mime_type "$path")
   case "$mime" in
     image/png|image/jpeg|image/gif|image/webp)
+      size=$(wc -c < "$path" | tr -d ' ')
+      if [[ "$size" -gt "$MAX_IMAGE_BYTES" ]]; then
+        "$JQ_BIN" -cn --arg t "Image is too large for the read tool ($size bytes; maximum 1 MiB). Use the shell tool to resize or compress the image, then call read again." \
+          '{kind:"error",text:$t}'
+        return
+      fi
       image_result "$path" "Image attached: $requested ($mime)" "$mime"
       ;;
     application/pdf) "$JQ_BIN" -cn '{kind:"error",text:"PDF files are not supported by the read tool."}' ;;

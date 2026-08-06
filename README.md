@@ -147,7 +147,7 @@ The default base URLs are the providers' public APIs. `ANTHROPIC_VERSION` defaul
 
 Every provider receives tools named `read` and `shell`. OpenAI's `shell` is its native local tool; its `read` tool and both Anthropic/OpenRouter tools use mini-agent's compatible function implementation:
 
-- `read` lists a directory, returns numbered slices of text files (up to 2,000 lines per call), extracts printable strings from otherwise unknown files when `strings` is available, and attaches PNG, JPEG, GIF, or WebP images.
+- `read` lists a directory, returns numbered slices of text files (up to 2,000 lines per call), extracts printable strings from otherwise unknown files when `strings` is available, and attaches PNG, JPEG, GIF, or WebP images up to 1 MiB. For a larger image, it returns an error directing the model to use `shell` to resize or compress the file first.
 - `shell` executes a command through `bash -lc` in the configured working directory. The compatible implementation reports combined output and exit status; OpenAI's native implementation reports stdout, stderr, and its outcome separately.
 
 PDF input is not supported. Tool output larger than `MINI_AGENT_MAX_TOOL_OUTPUT` is truncated by retaining its beginning and end. Each tool call starts in the configured working directory, so a `cd` in one call does not carry over to later calls.

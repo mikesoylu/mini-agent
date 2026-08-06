@@ -124,6 +124,8 @@ chmod +x "$TMP/curl"
 printf 'hello from fixture\n' > "$TMP/sample.txt"
 printf '%s' 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=' | base64 -d > "$TMP/large.png"
 dd if=/dev/zero bs=1024 count=400 >> "$TMP/large.png" 2>/dev/null
+cp "$TMP/large.png" "$TMP/oversized.png"
+dd if=/dev/zero bs=1024 count=700 >> "$TMP/oversized.png" 2>/dev/null
 printf 'not supported\n' > "$TMP/unsupported.pdf"
 
 out=$(OPENAI_API_KEY=test MOCK_CAPTURE="$TMP/openai.json" CURL_BIN="$TMP/curl" "$ROOT/mini-agent.sh" -q -m gpt-5.6-sol -r xhigh -C "$TMP" "inspect")
@@ -190,6 +192,11 @@ assert_equal "$(cut -f1 "$TMP/openrouter-fallback.trace" | paste -sd, -)" "opena
 out=$(OPENAI_API_KEY=test MOCK_READ_PATH=large.png MOCK_CAPTURE="$TMP/image.json" CURL_BIN="$TMP/curl" "$ROOT/mini-agent.sh" -q -C "$TMP" "inspect image")
 assert_contains "$out" "openai done" "Large image attachment avoids argument limits"
 assert_equal "$(jq -r '.input[] | select(.role == "user") | .content[] | select(.type == "input_image") | .type' "$TMP/image.json")" "input_image" "OpenAI read can attach image input"
+
+out=$(OPENAI_API_KEY=test MOCK_READ_PATH=oversized.png MOCK_CAPTURE="$TMP/oversized-image.json" CURL_BIN="$TMP/curl" "$ROOT/mini-agent.sh" -q -C "$TMP" "inspect oversized image")
+assert_contains "$out" "openai done" "Oversized image read completes with a tool error"
+assert_contains "$(jq -r '.input[] | select(.type == "function_call_output") | .output' "$TMP/oversized-image.json")" "Use the shell tool to resize or compress" "OpenAI read explains how to shrink an oversized image"
+assert_equal "$(jq '[.input[] | select(.role == "user") | .content[] | select(.type == "input_image")] | length' "$TMP/oversized-image.json")" "0" "Oversized image is not attached to OpenAI"
 
 out=$(printf '/quit\n' | OPENAI_API_KEY=test CURL_BIN="$TMP/curl" "$ROOT/mini-agent.sh" -q -i -C "$TMP" "interactive start")
 assert_contains "$out" "mini-agent openai" "Interactive mode"
@@ -291,6 +298,9 @@ tool_result=$(run_tool shell '{"command":"printf \"shell tool works\""}')
 assert_contains "$(printf '%s' "$tool_result" | jq -r '.text')" "shell tool works" "Compatible shell tool execution"
 read_result=$(read_file unsupported.pdf)
 assert_equal "$(printf '%s' "$read_result" | jq -r '.kind + ":" + .text')" "error:PDF files are not supported by the read tool." "Read tool rejects PDFs"
+read_result=$(read_file oversized.png)
+assert_equal "$(printf '%s' "$read_result" | jq -r '.kind')" "error" "Read tool rejects images larger than 1 MiB"
+assert_contains "$(printf '%s' "$read_result" | jq -r '.text')" "Use the shell tool to resize or compress" "Oversized image error recommends the shell tool"
 
 PROVIDER=anthropic
 API_RESPONSE='{"usage":{"input_tokens":100,"output_tokens":20,"cache_read_input_tokens":30,"cache_creation_input_tokens":40}}'
