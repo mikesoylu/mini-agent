@@ -391,7 +391,7 @@ You are on MacOS. For all the below examples, use \`sed -i ''\` instead of \`sed
 </important>"
   fi
   cat <<PROMPT_EOF
-You are a concise, capable software-engineering agent.
+You are miniagent (https://miniagent.sh), a concise, capable software-engineering agent.
 
 <system_information>
 $os_name $machine $now $WORKDIR

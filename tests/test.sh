@@ -141,6 +141,7 @@ assert_equal "$(jq -r '.max_output_tokens' "$TMP/openai.json")" "32768" "Default
 assert_equal "$(jq -r '.tools[0] | .type + ":" + .environment.type' "$TMP/openai.json")" "shell:local" "OpenAI uses native local shell"
 assert_equal "$(jq -r '.tools[1] | .type + ":" + .name' "$TMP/openai.json")" "function:read" "OpenAI uses a compatible read function"
 assert_equal "$(jq '.tools | length' "$TMP/openai.json")" "2" "OpenAI exposes read and shell only"
+assert_contains "$(jq -r '.instructions' "$TMP/openai.json")" "https://miniagent.sh" "System prompt identifies miniagent"
 assert_contains "$(jq -r '.instructions' "$TMP/openai.json")" "<system_information>" "System prompt includes machine information"
 assert_contains "$(jq -r '.instructions' "$TMP/openai.json")" "cat <<'EOF' > newfile.py" "System prompt includes file creation example"
 assert_contains "$(jq -r '.instructions' "$TMP/openai.json")" "nl -ba filename.py | sed -n '10,20p'" "System prompt includes file viewing example"
