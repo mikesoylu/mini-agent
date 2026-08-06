@@ -1,6 +1,6 @@
-# mini-agent.sh
+# miniagent.sh
 
-A deliberately small coding-agent harness inspired by mini-swe-agent. It is a single Bash script with no package installation step, built for GitHub Actions, CI/CD pipelines, remote SSH sessions, and similar headless environments. It works with OpenAI, Anthropic, and OpenRouter.
+A deliberately small coding-agent harness inspired by mini-swe-agent. It is a single Bash script with no package installation step, built for GitHub Actions, CI/CD pipelines, remote SSH sessions, and similar headless environments. It works with OpenAI, Anthropic, and OpenRouter, and can get started without an API key through the free public proxy at `miniagent.sh`.
 
 ## Features
 
@@ -23,50 +23,50 @@ A deliberately small coding-agent harness inspired by mini-swe-agent. It is a si
 
 ## Install
 
-Download the latest version from this repository into `~/.local/bin`:
+Download the latest version into `~/.local/bin`:
 
 ```bash
-mkdir -p "$HOME/.local/bin" && curl -fsSL https://raw.githubusercontent.com/mikesoylu/mini-agent/main/mini-agent.sh -o "$HOME/.local/bin/mini-agent" && chmod +x "$HOME/.local/bin/mini-agent"
+mkdir -p "$HOME/.local/bin" && curl -fsSL https://miniagent.sh -o "$HOME/.local/bin/miniagent" && chmod +x "$HOME/.local/bin/miniagent"
 ```
 
-This installs the script only; the requirements above must already be available. Make sure `~/.local/bin` is on your `PATH`, then run `mini-agent`. To use a local clone without installing it, run `chmod +x mini-agent.sh` followed by `./mini-agent.sh`.
+This installs the script only; the requirements above must already be available. Make sure `~/.local/bin` is on your `PATH`, then run `miniagent`.
 
 ## Quick start
 
 ```bash
-# Configure one provider.
+# Optionally configure a provider. Without a key, the free proxy is used.
 export OPENAI_API_KEY=...
 # export ANTHROPIC_API_KEY=...
 # export OPENROUTER_API_KEY=...
 
-mini-agent "Find and fix the failing tests"
+miniagent "Find and fix the failing tests"
 ```
 
-When several API keys are present, automatic provider selection prefers OpenAI, then Anthropic, then OpenRouter. Pass `--provider` to choose explicitly.
+When several API keys are present, automatic provider selection prefers OpenAI, then Anthropic, then OpenRouter. Pass `--provider` to choose explicitly. With no provider key, miniagent uses `https://miniagent.sh/api/completions`, which forces OpenRouter's `openrouter/free` router and has lower availability and rate limits than a direct provider account.
 
 ## Usage
 
 ```text
-mini-agent.sh [options] "task"
-mini-agent.sh [options]                 # interactive mode in a terminal
+miniagent.sh [options] "task"
+miniagent.sh [options]                 # interactive mode in a terminal
 ```
 
 Examples:
 
 ```bash
 # One-shot tasks
-./mini-agent.sh -m gpt-5.6-sol -r xhigh "Find and fix the failing tests"
-./mini-agent.sh -p anthropic -m claude-opus-5 "Explain this repository"
-./mini-agent.sh -p openrouter -C ./project "Review the current diff"
+./miniagent.sh -m gpt-5.6-sol -r xhigh "Find and fix the failing tests"
+./miniagent.sh -p anthropic -m claude-opus-5 "Explain this repository"
+./miniagent.sh -p openrouter -C ./project "Review the current diff"
 
 # Read a task from stdin
-printf 'List the main components' | ./mini-agent.sh -p openai
+printf 'List the main components' | ./miniagent.sh -p openai
 
 # Emit one JSON object on stdout
-./mini-agent.sh --json "Summarize the repository"
+./miniagent.sh --json "Summarize the repository"
 
 # Complete the initial task, then stay in an interactive session
-./mini-agent.sh -i "Start by reading README.md"
+./miniagent.sh -i "Start by reading README.md"
 ```
 
 ### CLI options
@@ -87,13 +87,13 @@ printf 'List the main components' | ./mini-agent.sh -p openai
 | `--json` | Return `{provider, model, fallback_model, reasoning, answer}` | Off |
 | `-q, --quiet` | Hide model and tool progress written to stderr | Off |
 | `-h, --help` | Show command help | |
-| `-v, --version` | Show the mini-agent version | |
+| `-v, --version` | Show the miniagent version | |
 
 Reasoning levels are `default`, `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. Provider and model support varies. `default` omits explicit reasoning controls. OpenAI and Anthropic map `minimal` to `low`; OpenRouter maps `max` to `xhigh`.
 
 ## Interactive sessions
 
-Run `./mini-agent.sh` with no task in a terminal, or add `-i` after an initial task. Conversation history and the active fallback model are retained between requests.
+Run `./miniagent.sh` with no task in a terminal, or add `-i` after an initial task. Conversation history and the active fallback model are retained between requests.
 
 | Command | Action |
 |---|---|
@@ -106,7 +106,7 @@ Run `./mini-agent.sh` with no task in a terminal, or add `-i` after an initial t
 | `/help` | Show interactive commands |
 | `/quit` or `/exit` | End the session |
 
-While an interactive request is running, a live `(queue) ` prompt remains visible for follow-up input. Each complete line entered there is queued and added to the conversation at the next safe boundary: after every tool call in the current provider response has a matching result, and before the next model call. Pressing Ctrl-D requests a graceful stop at the same boundary and then returns to the interactive prompt; it does not end the session. If the current response contains tool calls, mini-agent executes all of them, submits their results in one final tool-disabled provider call, waits for that response, and only then stops. This leaves no unresolved tool call to corrupt the next prompt. Use `/quit` or `/exit` to end the session.
+While an interactive request is running, a live `(queue) ` prompt remains visible for follow-up input. Each complete line entered there is queued and added to the conversation at the next safe boundary: after every tool call in the current provider response has a matching result, and before the next model call. Pressing Ctrl-D requests a graceful stop at the same boundary and then returns to the interactive prompt; it does not end the session. If the current response contains tool calls, miniagent executes all of them, submits their results in one final tool-disabled provider call, waits for that response, and only then stops. This leaves no unresolved tool call to corrupt the next prompt. Use `/quit` or `/exit` to end the session.
 
 After a refusal fallback, `/clear` preserves the active fallback model. `/model` or `/provider` selects a new primary model.
 
@@ -122,63 +122,63 @@ Command-line model and provider values take precedence over their environment-va
 | Anthropic | `ANTHROPIC_API_KEY` | `ANTHROPIC_MODEL`, `ANTHROPIC_FALLBACK_MODEL`, `ANTHROPIC_BASE_URL`, `ANTHROPIC_VERSION` | `claude-opus-5` / `claude-sonnet-5` |
 | OpenRouter | `OPENROUTER_API_KEY` | `OPENROUTER_MODEL`, `OPENROUTER_FALLBACK_MODEL`, `OPENROUTER_BASE_URL`, `OPENROUTER_HTTP_REFERER`, `OPENROUTER_APP_NAME` | `openai/gpt-5.6-sol` / `openai/gpt-5.6-terra` |
 
-The default base URLs are the providers' public APIs. `ANTHROPIC_VERSION` defaults to `2023-06-01`, and the default OpenRouter app title is `mini-agent`.
+The default base URLs are the providers' public APIs. `ANTHROPIC_VERSION` defaults to `2023-06-01`, and the default OpenRouter app title is `miniagent`.
 
 ### Shared settings
 
 | Variable | Purpose | Default |
 |---|---|---|
-| `MINI_AGENT_PROVIDER` | Provider selection | Inferred from API keys |
-| `MINI_AGENT_MODEL` | Primary model | Provider-specific |
-| `MINI_AGENT_FALLBACK_MODEL` | Refusal fallback model | Provider-specific |
-| `MINI_AGENT_REASONING` | Reasoning effort | `medium` |
-| `MINI_AGENT_MAX_TURNS` | Model calls per user request | `1024` |
-| `MINI_AGENT_MAX_TOKENS` | Output tokens per model call | `32768` |
-| `MINI_AGENT_COMPACT_TOKENS` | Automatic compaction threshold | `262144` |
-| `MINI_AGENT_COMPACT_MAX_TOKENS` | Upper bound for checkpoint-summary output; also capped at half the compaction threshold | `13107` |
-| `MINI_AGENT_MAX_TOOL_OUTPUT` | Maximum captured bytes for each stdout/stderr stream or compatible-tool result | `30000` |
-| `MINI_AGENT_TOOL_TIMEOUT` | Maximum command runtime in seconds when `timeout` or `gtimeout` is installed | `120` |
-| `MINI_AGENT_API_TIMEOUT` | Maximum API request time in seconds | `600` |
-| `MINI_AGENT_WORKDIR` | Agent working directory | Current directory |
-| `MINI_AGENT_DEBUG` | Enable diagnostic logging with `1` | `0` |
-| `MINI_AGENT_DEBUG_DIR` | Diagnostic bundle directory; otherwise a temporary directory is created | System temp directory |
+| `MINIAGENT_PROVIDER` | Provider selection | Inferred from API keys; OpenRouter public proxy when none exist |
+| `MINIAGENT_MODEL` | Primary model | Provider-specific |
+| `MINIAGENT_FALLBACK_MODEL` | Refusal fallback model | Provider-specific |
+| `MINIAGENT_REASONING` | Reasoning effort | `medium` |
+| `MINIAGENT_MAX_TURNS` | Model calls per user request | `1024` |
+| `MINIAGENT_MAX_TOKENS` | Output tokens per model call | `32768` |
+| `MINIAGENT_COMPACT_TOKENS` | Automatic compaction threshold | `262144` |
+| `MINIAGENT_COMPACT_MAX_TOKENS` | Upper bound for checkpoint-summary output; also capped at half the compaction threshold | `13107` |
+| `MINIAGENT_MAX_TOOL_OUTPUT` | Maximum captured bytes for each stdout/stderr stream or compatible-tool result | `30000` |
+| `MINIAGENT_TOOL_TIMEOUT` | Maximum command runtime in seconds when `timeout` or `gtimeout` is installed | `120` |
+| `MINIAGENT_API_TIMEOUT` | Maximum API request time in seconds | `600` |
+| `MINIAGENT_WORKDIR` | Agent working directory | Current directory |
+| `MINIAGENT_DEBUG` | Enable diagnostic logging with `1` | `0` |
+| `MINIAGENT_DEBUG_DIR` | Diagnostic bundle directory; otherwise a temporary directory is created | System temp directory |
 
 `CURL_BIN` and `JQ_BIN` may also be set to alternate executable paths, primarily for testing.
 
 ## Provider tools and file support
 
-Every provider receives tools named `read` and `shell`. OpenAI's `shell` is its native local tool; its `read` tool and both Anthropic/OpenRouter tools use mini-agent's compatible function implementation:
+Every provider receives tools named `read` and `shell`. OpenAI's `shell` is its native local tool; its `read` tool and both Anthropic/OpenRouter tools use miniagent's compatible function implementation:
 
 - `read` lists a directory, returns numbered slices of text files (up to 2,000 lines per call), extracts printable strings from otherwise unknown files when `strings` is available, and attaches PNG, JPEG, GIF, or WebP images up to 1 MiB. For a larger image, it returns an error directing the model to use `shell` to resize or compress the file first.
 - `shell` executes a command through `bash -lc` in the configured working directory. The compatible implementation reports combined output and exit status; OpenAI's native implementation reports stdout, stderr, and its outcome separately.
 
-PDF input is not supported. Tool output larger than `MINI_AGENT_MAX_TOOL_OUTPUT` is truncated by retaining its beginning and end. Each tool call starts in the configured working directory, so a `cd` in one call does not carry over to later calls.
+PDF input is not supported. Tool output larger than `MINIAGENT_MAX_TOOL_OUTPUT` is truncated by retaining its beginning and end. Each tool call starts in the configured working directory, so a `cd` in one call does not carry over to later calls.
 
 ## Context compaction
 
-After each model response, mini-agent records exact context usage reported by the provider; Anthropic cache-read and cache-creation tokens are included. Automatic compaction can run between tool-call rounds during a single agent turn. Before compacting, mini-agent executes every tool call in the current response and appends every result, so the provider never receives a checkpoint request with an unresolved tool call.
+After each model response, miniagent records exact context usage reported by the provider; Anthropic cache-read and cache-creation tokens are included. Automatic compaction can run between tool-call rounds during a single agent turn. Before compacting, miniagent executes every tool call in the current response and appends every result, so the provider never receives a checkpoint request with an unresolved tool call.
 
-Compaction asks the active model for a structured checkpoint, replaces older history with that checkpoint, and retains the latest complete turn. Checkpoint output is capped at the lowest of `MINI_AGENT_COMPACT_MAX_TOKENS`, half of the compaction threshold, and the normal model-output limit. The request is appended to the existing provider-native conversation to preserve the cacheable prefix. For mid-turn compaction, mini-agent appends a fresh continuation message after the checkpoint and tool results so the model resumes the original task instead of acknowledging the checkpoint. OpenAI keeps its `previous_response_id` chain for the summary request, then starts a fresh chain from the compacted transcript; the complete checkpoint is preserved when rebuilding that chain, while ordinary historical messages and tool output remain clipped. Image paths and short visual summaries are explicitly preserved in the checkpoint. Token usage is shown as unknown until the next normal response refreshes it.
+Compaction asks the active model for a structured checkpoint, replaces older history with that checkpoint, and retains the latest complete turn. Checkpoint output is capped at the lowest of `MINIAGENT_COMPACT_MAX_TOKENS`, half of the compaction threshold, and the normal model-output limit. The request is appended to the existing provider-native conversation to preserve the cacheable prefix. For mid-turn compaction, miniagent appends a fresh continuation message after the checkpoint and tool results so the model resumes the original task instead of acknowledging the checkpoint. OpenAI keeps its `previous_response_id` chain for the summary request, then starts a fresh chain from the compacted transcript; the complete checkpoint is preserved when rebuilding that chain, while ordinary historical messages and tool output remain clipped. Image paths and short visual summaries are explicitly preserved in the checkpoint. Token usage is shown as unknown until the next normal response refreshes it.
 
-If automatic compaction fails, mini-agent records the failure and continues the current agent turn with its existing history and resolved tool results. Manual `/compact` still reports failure directly.
+If automatic compaction fails, miniagent records the failure and continues the current agent turn with its existing history and resolved tool results. Manual `/compact` still reports failure directly.
 
 ## Debug logging
 
-Pass `--debug` or set `MINI_AGENT_DEBUG=1` to create a per-process diagnostic bundle named `mini-agent-debug.<pid>.*` under `${TMPDIR:-/tmp}`. The bundle path is printed to stderr. Use `--debug-dir DIR` or `MINI_AGENT_DEBUG_DIR` to choose its location.
+Pass `--debug` or set `MINIAGENT_DEBUG=1` to create a per-process diagnostic bundle named `miniagent-debug.<pid>.*` under `${TMPDIR:-/tmp}`. The bundle path is printed to stderr. Use `--debug-dir DIR` or `MINIAGENT_DEBUG_DIR` to choose its location.
 
 The bundle includes an event log with timestamps, PID, process lifecycle, configuration and state transitions; complete provider request and response bodies; compaction prompts, pending tool results, histories and summaries; and raw tool stdout/stderr. The process environment and API authorization headers are never logged. The directory and its files are restricted to the current user where the platform permits it. Request bodies and tool output can still contain sensitive repository or command data, so share debug bundles carefully.
 
 ## Refusal fallback
 
-If a provider returns a recognized safety refusal, mini-agent retries the same request once with the fallback model. A successful fallback becomes the active model for the rest of the interactive session, including later requests, compaction, and `/clear`. Use `--fallback-model none` to disable this behavior.
+If a provider returns a recognized safety refusal, miniagent retries the same request once with the fallback model. A successful fallback becomes the active model for the rest of the interactive session, including later requests, compaction, and `/clear`. Use `--fallback-model none` to disable this behavior.
 
 Recognized signals are Anthropic `stop_reason: "refusal"`, OpenAI refusal output and matching HTTP content-policy or cybersecurity rejections, and OpenRouter `content_filter` or `message.refusal` responses. Network failures, rate limits, overloads, and ordinary API errors are returned without switching models.
 
 ## Security and execution notes
 
-The native OpenAI shell and provider-compatible `shell` tool can run arbitrary commands with the same permissions and environment as mini-agent. Use a working directory and environment you are comfortable exposing to the selected model, and avoid placing unrelated secrets in that environment.
+The native OpenAI shell and provider-compatible `shell` tool can run arbitrary commands with the same permissions and environment as miniagent. Use a working directory and environment you are comfortable exposing to the selected model, and avoid placing unrelated secrets in that environment.
 
-API requests are non-streaming to keep the script compact and provider-neutral. When GNU `timeout` or `gtimeout` is unavailable, command execution still works but the harness cannot enforce `MINI_AGENT_TOOL_TIMEOUT`.
+API requests are non-streaming to keep the script compact and provider-neutral. When GNU `timeout` or `gtimeout` is unavailable, command execution still works but the harness cannot enforce `MINIAGENT_TOOL_TIMEOUT`.
 
 ## Tests
 

@@ -1,23 +1,23 @@
 #!/usr/bin/env bash
-# mini-agent: a deliberately small, Bash-only coding agent harness.
+# miniagent: a deliberately small, Bash-only coding agent harness.
 set -uo pipefail
 VERSION="0.2.0"
-PROVIDER="${MINI_AGENT_PROVIDER:-}"
-MODEL="${MINI_AGENT_MODEL:-}"
-FALLBACK_MODEL="${MINI_AGENT_FALLBACK_MODEL:-}"
+PROVIDER="${MINIAGENT_PROVIDER:-}"
+MODEL="${MINIAGENT_MODEL:-}"
+FALLBACK_MODEL="${MINIAGENT_FALLBACK_MODEL:-}"
 TURN_MODEL=""
-REASONING="${MINI_AGENT_REASONING:-medium}"
-MAX_TURNS="${MINI_AGENT_MAX_TURNS:-1024}"
-MAX_TOKENS="${MINI_AGENT_MAX_TOKENS:-32768}"
-COMPACT_TOKENS="${MINI_AGENT_COMPACT_TOKENS:-262144}"
-COMPACT_MAX_TOKENS="${MINI_AGENT_COMPACT_MAX_TOKENS:-13107}"
-MAX_TOOL_OUTPUT="${MINI_AGENT_MAX_TOOL_OUTPUT:-30000}"
+REASONING="${MINIAGENT_REASONING:-medium}"
+MAX_TURNS="${MINIAGENT_MAX_TURNS:-1024}"
+MAX_TOKENS="${MINIAGENT_MAX_TOKENS:-32768}"
+COMPACT_TOKENS="${MINIAGENT_COMPACT_TOKENS:-262144}"
+COMPACT_MAX_TOKENS="${MINIAGENT_COMPACT_MAX_TOKENS:-13107}"
+MAX_TOOL_OUTPUT="${MINIAGENT_MAX_TOOL_OUTPUT:-30000}"
 MAX_IMAGE_BYTES=1048576
-TOOL_TIMEOUT="${MINI_AGENT_TOOL_TIMEOUT:-120}"
-API_TIMEOUT="${MINI_AGENT_API_TIMEOUT:-600}"
-WORKDIR="${MINI_AGENT_WORKDIR:-$PWD}"
-DEBUG="${MINI_AGENT_DEBUG:-0}"
-DEBUG_DIR="${MINI_AGENT_DEBUG_DIR:-}"
+TOOL_TIMEOUT="${MINIAGENT_TOOL_TIMEOUT:-120}"
+API_TIMEOUT="${MINIAGENT_API_TIMEOUT:-600}"
+WORKDIR="${MINIAGENT_WORKDIR:-$PWD}"
+DEBUG="${MINIAGENT_DEBUG:-0}"
+DEBUG_DIR="${MINIAGENT_DEBUG_DIR:-}"
 DEBUG_LOG=""
 DEBUG_ARGV=()
 OUTPUT_FORMAT="text"
@@ -43,6 +43,7 @@ COMPACTION_SUMMARY=""
 LAST_ANSWER=""
 CURL_BIN="${CURL_BIN:-curl}"
 JQ_BIN="${JQ_BIN:-jq}"
+OPENROUTER_COMPLETIONS_PATH="/chat/completions"
 if [[ -t 2 ]]; then
   C_DIM=$'\033[2m'; C_CYAN=$'\033[36m'; C_RED=$'\033[31m'; C_RESET=$'\033[0m'
 else
@@ -50,14 +51,14 @@ else
 fi
 say() { [[ "$QUIET" -eq 1 ]] || printf '%s\n' "$*" >&2; }
 info() { say "${C_DIM}$*${C_RESET}"; }
-die() { debug_log "fatal message=$(printf '%q' "$*")"; printf '%smini-agent: %s%s\n' "$C_RED" "$*" "$C_RESET" >&2; exit 1; }
+die() { debug_log "fatal message=$(printf '%q' "$*")"; printf '%sminiagent: %s%s\n' "$C_RED" "$*" "$C_RESET" >&2; exit 1; }
 usage() {
   cat <<'EOF'
-mini-agent - a tiny Bash-only coding agent
+miniagent - a tiny Bash-only coding agent
 
 Usage:
-  mini-agent.sh [options] "task"
-  mini-agent.sh [options]                 # interactive mode
+  miniagent.sh [options] "task"
+  miniagent.sh [options]                 # interactive mode
 
 Options:
   -p, --provider NAME     openai, anthropic, or openrouter
@@ -80,11 +81,13 @@ Environment:
   OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL, OPENAI_FALLBACK_MODEL
   ANTHROPIC_API_KEY, ANTHROPIC_BASE_URL, ANTHROPIC_MODEL, ANTHROPIC_FALLBACK_MODEL
   OPENROUTER_API_KEY, OPENROUTER_BASE_URL, OPENROUTER_MODEL, OPENROUTER_FALLBACK_MODEL
-  MINI_AGENT_PROVIDER, MINI_AGENT_MODEL, MINI_AGENT_FALLBACK_MODEL, MINI_AGENT_REASONING
-  MINI_AGENT_MAX_TURNS, MINI_AGENT_MAX_TOKENS, MINI_AGENT_COMPACT_TOKENS
-  MINI_AGENT_COMPACT_MAX_TOKENS, MINI_AGENT_TOOL_TIMEOUT, MINI_AGENT_DEBUG
-  MINI_AGENT_DEBUG_DIR
+  MINIAGENT_PROVIDER, MINIAGENT_MODEL, MINIAGENT_FALLBACK_MODEL, MINIAGENT_REASONING
+  MINIAGENT_MAX_TURNS, MINIAGENT_MAX_TOKENS, MINIAGENT_COMPACT_TOKENS
+  MINIAGENT_COMPACT_MAX_TOKENS, MINIAGENT_TOOL_TIMEOUT, MINIAGENT_DEBUG
+  MINIAGENT_DEBUG_DIR
   OPENROUTER_HTTP_REFERER, OPENROUTER_APP_NAME
+
+If no provider API key is set, miniagent uses the free public proxy at miniagent.sh.
 
 Interactive commands:
   /model NAME, /provider NAME, /reasoning LEVEL, /compact, /status, /clear, /help, /quit
@@ -231,19 +234,19 @@ init_debug() {
   case "$DEBUG" in
     1|true|TRUE|yes|YES|on|ON) DEBUG=1 ;;
     0|false|FALSE|no|NO|off|OFF|'') DEBUG=0; return 0 ;;
-    *) die "MINI_AGENT_DEBUG must be 0 or 1" ;;
+    *) die "MINIAGENT_DEBUG must be 0 or 1" ;;
   esac
   if [[ -n "$DEBUG_DIR" ]]; then
     mkdir -p "$DEBUG_DIR" || die "cannot create debug directory: $DEBUG_DIR"
     DEBUG_DIR=$(cd "$DEBUG_DIR" 2>/dev/null && pwd -P) || die "cannot enter debug directory"
   else
-    DEBUG_DIR=$(mktemp -d "${TMPDIR:-/tmp}/mini-agent-debug.$$.XXXXXX") || die "cannot create debug directory"
+    DEBUG_DIR=$(mktemp -d "${TMPDIR:-/tmp}/miniagent-debug.$$.XXXXXX") || die "cannot create debug directory"
   fi
   chmod 700 "$DEBUG_DIR" 2>/dev/null || true
   DEBUG_LOG="$DEBUG_DIR/events.log"
   : > "$DEBUG_LOG"
   chmod 600 "$DEBUG_LOG" 2>/dev/null || true
-  printf 'mini-agent: debug bundle: %s\n' "$DEBUG_DIR" >&2
+  printf 'miniagent: debug bundle: %s\n' "$DEBUG_DIR" >&2
   debug_log "session_start ppid=$PPID uid=${UID:-unknown} euid=${EUID:-unknown} bash=${BASH_VERSION:-unknown} cwd=$PWD"
   for arg in "${DEBUG_ARGV[@]}"; do
     debug_log "argv[$index]=$(printf '%q' "$arg")"
@@ -271,7 +274,7 @@ parse_args() {
       --json) OUTPUT_FORMAT="json"; shift ;;
       -q|--quiet) QUIET=1; shift ;;
       -h|--help) usage; exit 0 ;;
-      -v|--version) printf 'mini-agent %s\n' "$VERSION"; exit 0 ;;
+      -v|--version) printf 'miniagent %s\n' "$VERSION"; exit 0 ;;
       --) shift; while [[ $# -gt 0 ]]; do parts+=("$1"); shift; done ;;
       -*) die "unknown option: $1" ;;
       *) parts+=("$1"); shift ;;
@@ -284,7 +287,7 @@ select_provider() {
     if [[ -n "${OPENAI_API_KEY:-}" ]]; then PROVIDER="openai"
     elif [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then PROVIDER="anthropic"
     elif [[ -n "${OPENROUTER_API_KEY:-}" ]]; then PROVIDER="openrouter"
-    else die "set OPENAI_API_KEY, ANTHROPIC_API_KEY, or OPENROUTER_API_KEY"
+    else PROVIDER="openrouter"
     fi
   fi
   case "$PROVIDER" in
@@ -301,10 +304,18 @@ select_provider() {
       API_URL="${ANTHROPIC_BASE_URL:-https://api.anthropic.com/v1}"
       ;;
     openrouter)
-      : "${OPENROUTER_API_KEY:?OPENROUTER_API_KEY is required}"
-      MODEL="${MODEL:-${OPENROUTER_MODEL:-openai/gpt-5.6-sol}}"
-      FALLBACK_MODEL="${FALLBACK_MODEL:-${OPENROUTER_FALLBACK_MODEL:-openai/gpt-5.6-terra}}"
-      API_URL="${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}"
+      if [[ -n "${OPENROUTER_API_KEY:-}" ]]; then
+        MODEL="${MODEL:-${OPENROUTER_MODEL:-openai/gpt-5.6-sol}}"
+        FALLBACK_MODEL="${FALLBACK_MODEL:-${OPENROUTER_FALLBACK_MODEL:-openai/gpt-5.6-terra}}"
+        API_URL="${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}"
+        OPENROUTER_COMPLETIONS_PATH="/chat/completions"
+      else
+        OPENROUTER_API_KEY=""
+        MODEL="${MODEL:-openrouter/free}"
+        FALLBACK_MODEL="${FALLBACK_MODEL:-none}"
+        API_URL="https://miniagent.sh/api"
+        OPENROUTER_COMPLETIONS_PATH="/completions"
+      fi
       ;;
     *) die "unsupported provider: $PROVIDER" ;;
   esac
@@ -315,7 +326,7 @@ validate_config() {
   is_uint "$MAX_TURNS" || die "--max-turns must be a positive integer"
   is_uint "$MAX_TOKENS" || die "--max-tokens must be a positive integer"
   is_uint "$COMPACT_TOKENS" || die "--compact-tokens must be a positive integer"
-  is_uint "$COMPACT_MAX_TOKENS" || die "MINI_AGENT_COMPACT_MAX_TOKENS must be a positive integer"
+  is_uint "$COMPACT_MAX_TOKENS" || die "MINIAGENT_COMPACT_MAX_TOKENS must be a positive integer"
   [[ -d "$WORKDIR" ]] || die "working directory does not exist: $WORKDIR"
   WORKDIR=$(cd "$WORKDIR" 2>/dev/null && pwd -P) || die "cannot enter working directory"
 }
@@ -401,8 +412,8 @@ api_request() {
   shift 4
   debug_log "api_request_start provider=$PROVIDER model=${TURN_MODEL:-$MODEL} url=$url previous_response_id=${OPENAI_PREVIOUS_RESPONSE_ID:-none} body_bytes=$(printf '%s' "$body" | wc -c | tr -d ' ') extra_header_args=$#"
   debug_dump api-request.json "$body"
-  response_file=$(mktemp "${TMPDIR:-/tmp}/mini-agent-response.XXXXXX") || return 1
-  status_file=$(mktemp "${TMPDIR:-/tmp}/mini-agent-status.XXXXXX") || { rm -f "$response_file"; return 1; }
+  response_file=$(mktemp "${TMPDIR:-/tmp}/miniagent-response.XXXXXX") || return 1
+  status_file=$(mktemp "${TMPDIR:-/tmp}/miniagent-status.XXXXXX") || { rm -f "$response_file"; return 1; }
   "$CURL_BIN" -sS --connect-timeout 20 --max-time "$API_TIMEOUT" \
     -o "$response_file" -w '%{http_code}' -X POST "$url" \
     -H 'content-type: application/json' -H "$key_header: $key" "$@" \
@@ -431,7 +442,7 @@ api_request() {
 }
 call_openrouter() {
   local tool_mode=${1:-enabled} body tools reason_args='{}' tool_args='{}' key url
-  local extra_headers=(-H "X-Title: ${OPENROUTER_APP_NAME:-mini-agent}")
+  local extra_headers=(-H "X-Title: ${OPENROUTER_APP_NAME:-miniagent}")
   if [[ "$tool_mode" == "enabled" ]]; then
     tools=$(tools_compatible)
     tool_args=$("$JQ_BIN" -cn --argjson tools "$tools" \
@@ -446,7 +457,7 @@ call_openrouter() {
     --slurpfile history <(printf '%s\n' "$HISTORY") --argjson tool_args "$tool_args" --argjson extra "$reason_args" \
     --argjson max "$MAX_TOKENS" \
     '({model:$model,messages:([{role:"system",content:$system}] + $history[0]),max_completion_tokens:$max} + $tool_args + $extra)')
-  key=$OPENROUTER_API_KEY; url="$API_URL/chat/completions"
+  key=$OPENROUTER_API_KEY; url="$API_URL$OPENROUTER_COMPLETIONS_PATH"
   [[ -n "${OPENROUTER_HTTP_REFERER:-}" ]] && extra_headers+=( -H "HTTP-Referer: $OPENROUTER_HTTP_REFERER" )
   [[ -n "${OPENROUTER_APP_NAME:-}" ]] && extra_headers+=( -H "X-Title: $OPENROUTER_APP_NAME" )
   api_request "$url" "authorization" "Bearer $key" "$body" "${extra_headers[@]}" || return 1
@@ -800,7 +811,7 @@ truncate_file() {
 
 run_shell() {
   local command_text=$1 tmp status output command_pid timer=()
-  tmp=$(mktemp "${TMPDIR:-/tmp}/mini-agent-tool.XXXXXX") || return 1
+  tmp=$(mktemp "${TMPDIR:-/tmp}/miniagent-tool.XXXXXX") || return 1
   if command -v timeout >/dev/null 2>&1; then timer=(timeout "$TOOL_TIMEOUT")
   elif command -v gtimeout >/dev/null 2>&1; then timer=(gtimeout "$TOOL_TIMEOUT"); fi
   (cd "$WORKDIR" && "${timer[@]}" bash -lc "$command_text") < /dev/null > "$tmp" 2>&1 &
@@ -818,8 +829,8 @@ run_shell() {
 
 run_native_command() {
   local command_text=$1 requested_limit=$2 timeout_seconds=$3 out_file err_file status stdout stderr cap command_pid timer=()
-  out_file=$(mktemp "${TMPDIR:-/tmp}/mini-agent-stdout.XXXXXX") || return 1
-  err_file=$(mktemp "${TMPDIR:-/tmp}/mini-agent-stderr.XXXXXX") || { rm -f "$out_file"; return 1; }
+  out_file=$(mktemp "${TMPDIR:-/tmp}/miniagent-stdout.XXXXXX") || return 1
+  err_file=$(mktemp "${TMPDIR:-/tmp}/miniagent-stderr.XXXXXX") || { rm -f "$out_file"; return 1; }
   cap=$requested_limit
   [[ "$cap" =~ ^[1-9][0-9]*$ ]] || cap=$MAX_TOOL_OUTPUT
   [[ "$cap" -gt "$MAX_TOOL_OUTPUT" ]] && cap=$MAX_TOOL_OUTPUT
@@ -1215,7 +1226,7 @@ run_interactive_agent_turn() {
 
 interactive_loop() {
   local line value prompt
-  printf 'mini-agent %s · %s · reasoning %s · %s\n' "$PROVIDER" "$MODEL" "$REASONING" "$WORKDIR"
+  printf 'miniagent %s · %s · reasoning %s · %s\n' "$PROVIDER" "$MODEL" "$REASONING" "$WORKDIR"
   prompt=$(interactive_prompt)
   while true; do
     IFS= read -e -r -p "$prompt" line || { printf '\n'; if [[ -t 0 ]]; then continue; else break; fi; }

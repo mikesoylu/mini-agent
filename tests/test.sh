@@ -2,7 +2,7 @@
 set -uo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd -P)
-TMP=$(mktemp -d "${TMPDIR:-/tmp}/mini-agent-test.XXXXXX")
+TMP=$(mktemp -d "${TMPDIR:-/tmp}/miniagent-test.XXXXXX")
 trap 'rm -rf "$TMP"' EXIT
 PASS=0
 FAIL=0
@@ -26,6 +26,7 @@ while [[ $# -gt 0 ]]; do
 done
 [[ "$body" == "@-" ]] && body=$(cat)
 [[ -n "${MOCK_CAPTURE:-}" ]] && printf '%s' "$body" > "$MOCK_CAPTURE"
+[[ -n "${MOCK_URL_CAPTURE:-}" ]] && printf '%s' "$url" > "$MOCK_URL_CAPTURE"
 if [[ -n "${MOCK_NO_TOOLS_CAPTURE:-}" ]] &&
    printf '%s' "$body" | jq -e 'has("tools") | not' >/dev/null 2>&1; then
   printf '%s' "$body" > "$MOCK_NO_TOOLS_CAPTURE"
@@ -133,7 +134,7 @@ cp "$TMP/large.png" "$TMP/oversized.png"
 dd if=/dev/zero bs=1024 count=700 >> "$TMP/oversized.png" 2>/dev/null
 printf 'not supported\n' > "$TMP/unsupported.pdf"
 
-out=$(OPENAI_API_KEY=test MOCK_CAPTURE="$TMP/openai.json" CURL_BIN="$TMP/curl" "$ROOT/mini-agent.sh" -q -m gpt-5.6-sol -r xhigh -C "$TMP" "inspect")
+out=$(OPENAI_API_KEY=test MOCK_CAPTURE="$TMP/openai.json" CURL_BIN="$TMP/curl" "$ROOT/miniagent.sh" -q -m gpt-5.6-sol -r xhigh -C "$TMP" "inspect")
 assert_contains "$out" "openai done" "OpenAI Responses shell loop"
 assert_equal "$(jq -r '.reasoning.effort' "$TMP/openai.json")" "xhigh" "OpenAI Responses reasoning selection"
 assert_equal "$(jq -r '.max_output_tokens' "$TMP/openai.json")" "32768" "Default maximum output tokens"
@@ -147,66 +148,71 @@ if [[ $(uname -s) == Darwin ]]; then assert_contains "$(jq -r '.instructions' "$
 assert_contains "$(jq -r '.input[] | select(.type == "shell_call_output") | .output[0].stdout' "$TMP/openai.json")" "hello from fixture" "OpenAI shell output continuation"
 assert_equal "$(jq -r '.model' "$TMP/openai.json")" "gpt-5.6-sol" "OpenAI default model"
 
-progress=$(OPENAI_API_KEY=test CURL_BIN="$TMP/curl" "$ROOT/mini-agent.sh" -m gpt-5.6-sol -C "$TMP" "inspect" 2>&1 >/dev/null)
+progress=$(OPENAI_API_KEY=test CURL_BIN="$TMP/curl" "$ROOT/miniagent.sh" -m gpt-5.6-sol -C "$TMP" "inspect" 2>&1 >/dev/null)
 assert_contains "$progress" "context unknown/262144 · turn 1/1024" "Progress shows unknown context before initial usage"
 assert_contains "$progress" "context 50/262144 · turn 2/1024" "Progress shows latest provider context usage"
 
-out=$(ANTHROPIC_API_KEY=test MOCK_CAPTURE="$TMP/anthropic.json" CURL_BIN="$TMP/curl" "$ROOT/mini-agent.sh" -q -p anthropic -C "$TMP" "inspect")
+out=$(ANTHROPIC_API_KEY=test MOCK_CAPTURE="$TMP/anthropic.json" CURL_BIN="$TMP/curl" "$ROOT/miniagent.sh" -q -p anthropic -C "$TMP" "inspect")
 assert_contains "$out" "anthropic done" "Anthropic tool loop"
 assert_equal "$(jq -r '.model' "$TMP/anthropic.json")" "claude-opus-5" "Anthropic default model"
 assert_equal "$(jq -r '.thinking.type + ":" + .output_config.effort' "$TMP/anthropic.json")" "adaptive:medium" "Anthropic reasoning selection"
 assert_equal "$(jq -r '[.tools[].name] | join(",")' "$TMP/anthropic.json")" "read,shell" "Anthropic exposes read and shell only"
 
-out=$(OPENROUTER_API_KEY=test MOCK_CAPTURE="$TMP/openrouter.json" CURL_BIN="$TMP/curl" "$ROOT/mini-agent.sh" -q -p openrouter --json -C "$TMP" "inspect")
+out=$(OPENROUTER_API_KEY=test MOCK_CAPTURE="$TMP/openrouter.json" CURL_BIN="$TMP/curl" "$ROOT/miniagent.sh" -q -p openrouter --json -C "$TMP" "inspect")
 answer=$(printf '%s' "$out" | jq -r '.answer')
 assert_contains "$answer" "openai done" "OpenRouter JSON mode"
 assert_equal "$(jq -r '.model' "$TMP/openrouter.json")" "openai/gpt-5.6-sol" "OpenRouter default model"
 assert_equal "$(jq -r '[.tools[].function.name] | join(",")' "$TMP/openrouter.json")" "read,shell" "OpenRouter exposes read and shell only"
 
+out=$(OPENAI_API_KEY= ANTHROPIC_API_KEY= OPENROUTER_API_KEY= MOCK_CAPTURE="$TMP/public-proxy.json" MOCK_URL_CAPTURE="$TMP/public-proxy.url" CURL_BIN="$TMP/curl" "$ROOT/miniagent.sh" -q -C "$TMP" "inspect")
+assert_contains "$out" "openai done" "No-key mode uses the public completion proxy"
+assert_equal "$(cat "$TMP/public-proxy.url")" "https://miniagent.sh/api/completions" "No-key mode calls miniagent.sh"
+assert_equal "$(jq -r '.model' "$TMP/public-proxy.json")" "openrouter/free" "No-key mode requests the free model router"
+
 : > "$TMP/openai-fallback.trace"
-out=$(OPENAI_API_KEY=test MOCK_REFUSE_MODEL=gpt-5.6-sol MOCK_TRACE="$TMP/openai-fallback.trace" CURL_BIN="$TMP/curl" "$ROOT/mini-agent.sh" -q -C "$TMP" "inspect")
+out=$(OPENAI_API_KEY=test MOCK_REFUSE_MODEL=gpt-5.6-sol MOCK_TRACE="$TMP/openai-fallback.trace" CURL_BIN="$TMP/curl" "$ROOT/miniagent.sh" -q -C "$TMP" "inspect")
 assert_contains "$out" "openai done" "OpenAI retries a refusal"
 assert_equal "$(cut -f1 "$TMP/openai-fallback.trace" | paste -sd, -)" "gpt-5.6-sol,gpt-5.6-terra,gpt-5.6-terra" "OpenAI pins fallback for the turn"
 assert_equal "$(sed -n '2p' "$TMP/openai-fallback.trace" | cut -f2)" "-" "OpenAI retry does not chain from refused response"
 
 : > "$TMP/openai-http-fallback.trace"
-out=$(OPENAI_API_KEY=test MOCK_HTTP_REFUSE_MODEL=gpt-5.6-sol MOCK_TRACE="$TMP/openai-http-fallback.trace" CURL_BIN="$TMP/curl" "$ROOT/mini-agent.sh" -q -C "$TMP" "inspect")
+out=$(OPENAI_API_KEY=test MOCK_HTTP_REFUSE_MODEL=gpt-5.6-sol MOCK_TRACE="$TMP/openai-http-fallback.trace" CURL_BIN="$TMP/curl" "$ROOT/miniagent.sh" -q -C "$TMP" "inspect")
 assert_contains "$out" "openai done" "OpenAI retries an HTTP safety rejection"
 assert_equal "$(cut -f1 "$TMP/openai-http-fallback.trace" | paste -sd, -)" "gpt-5.6-sol,gpt-5.6-terra,gpt-5.6-terra" "OpenAI HTTP safety rejection pins fallback for the turn"
 
 : > "$TMP/openai-error.trace"
-OPENAI_API_KEY=test MOCK_HTTP_ERROR_MODEL=gpt-5.6-sol MOCK_TRACE="$TMP/openai-error.trace" CURL_BIN="$TMP/curl" "$ROOT/mini-agent.sh" -q -C "$TMP" "inspect" >/dev/null 2>&1
+OPENAI_API_KEY=test MOCK_HTTP_ERROR_MODEL=gpt-5.6-sol MOCK_TRACE="$TMP/openai-error.trace" CURL_BIN="$TMP/curl" "$ROOT/miniagent.sh" -q -C "$TMP" "inspect" >/dev/null 2>&1
 assert_equal "$?" "1" "Ordinary API errors still fail"
 assert_equal "$(wc -l < "$TMP/openai-error.trace" | tr -d ' ')" "1" "Ordinary API errors do not use fallback"
 
 : > "$TMP/anthropic-fallback.trace"
-out=$(ANTHROPIC_API_KEY=test MOCK_REFUSE_MODEL=claude-fable-5 MOCK_TRACE="$TMP/anthropic-fallback.trace" CURL_BIN="$TMP/curl" "$ROOT/mini-agent.sh" -q -p anthropic -m claude-fable-5 --fallback-model claude-sonnet-5 -C "$TMP" "inspect")
+out=$(ANTHROPIC_API_KEY=test MOCK_REFUSE_MODEL=claude-fable-5 MOCK_TRACE="$TMP/anthropic-fallback.trace" CURL_BIN="$TMP/curl" "$ROOT/miniagent.sh" -q -p anthropic -m claude-fable-5 --fallback-model claude-sonnet-5 -C "$TMP" "inspect")
 assert_contains "$out" "anthropic done" "Anthropic retries stop_reason refusal"
 assert_equal "$(cut -f1 "$TMP/anthropic-fallback.trace" | paste -sd, -)" "claude-fable-5,claude-sonnet-5,claude-sonnet-5" "Anthropic pins configured fallback for the turn"
 
 : > "$TMP/anthropic-session-fallback.trace"
-out=$(printf 'second request\n/clear\nthird request\n/quit\n' | ANTHROPIC_API_KEY=test MOCK_REFUSE_MODEL=claude-fable-5 MOCK_TRACE="$TMP/anthropic-session-fallback.trace" CURL_BIN="$TMP/curl" "$ROOT/mini-agent.sh" -q -i -p anthropic -m claude-fable-5 --fallback-model claude-sonnet-5 -C "$TMP" "first request")
+out=$(printf 'second request\n/clear\nthird request\n/quit\n' | ANTHROPIC_API_KEY=test MOCK_REFUSE_MODEL=claude-fable-5 MOCK_TRACE="$TMP/anthropic-session-fallback.trace" CURL_BIN="$TMP/curl" "$ROOT/miniagent.sh" -q -i -p anthropic -m claude-fable-5 --fallback-model claude-sonnet-5 -C "$TMP" "first request")
 assert_contains "$out" "anthropic done" "Anthropic interactive session continues after fallback"
 assert_equal "$(cut -f1 "$TMP/anthropic-session-fallback.trace" | paste -sd, -)" "claude-fable-5,claude-sonnet-5,claude-sonnet-5,claude-sonnet-5,claude-sonnet-5,claude-sonnet-5" "Anthropic keeps fallback for subsequent messages and /clear"
 
 : > "$TMP/openrouter-fallback.trace"
-out=$(OPENROUTER_API_KEY=test MOCK_REFUSE_MODEL=openai/gpt-5.6-sol MOCK_TRACE="$TMP/openrouter-fallback.trace" CURL_BIN="$TMP/curl" "$ROOT/mini-agent.sh" -q -p openrouter -C "$TMP" "inspect")
+out=$(OPENROUTER_API_KEY=test MOCK_REFUSE_MODEL=openai/gpt-5.6-sol MOCK_TRACE="$TMP/openrouter-fallback.trace" CURL_BIN="$TMP/curl" "$ROOT/miniagent.sh" -q -p openrouter -C "$TMP" "inspect")
 assert_contains "$out" "openai done" "OpenRouter retries a content-filter refusal"
 assert_equal "$(cut -f1 "$TMP/openrouter-fallback.trace" | paste -sd, -)" "openai/gpt-5.6-sol,openai/gpt-5.6-terra,openai/gpt-5.6-terra" "OpenRouter pins fallback for the turn"
 
-out=$(OPENAI_API_KEY=test MOCK_READ_PATH=large.png MOCK_CAPTURE="$TMP/image.json" CURL_BIN="$TMP/curl" "$ROOT/mini-agent.sh" -q -C "$TMP" "inspect image")
+out=$(OPENAI_API_KEY=test MOCK_READ_PATH=large.png MOCK_CAPTURE="$TMP/image.json" CURL_BIN="$TMP/curl" "$ROOT/miniagent.sh" -q -C "$TMP" "inspect image")
 assert_contains "$out" "openai done" "Large image attachment avoids argument limits"
 assert_equal "$(jq -r '.input[] | select(.role == "user") | .content[] | select(.type == "input_image") | .type' "$TMP/image.json")" "input_image" "OpenAI read can attach image input"
 
-out=$(OPENAI_API_KEY=test MOCK_READ_PATH=oversized.png MOCK_CAPTURE="$TMP/oversized-image.json" CURL_BIN="$TMP/curl" "$ROOT/mini-agent.sh" -q -C "$TMP" "inspect oversized image")
+out=$(OPENAI_API_KEY=test MOCK_READ_PATH=oversized.png MOCK_CAPTURE="$TMP/oversized-image.json" CURL_BIN="$TMP/curl" "$ROOT/miniagent.sh" -q -C "$TMP" "inspect oversized image")
 assert_contains "$out" "openai done" "Oversized image read completes with a tool error"
 assert_contains "$(jq -r '.input[] | select(.type == "function_call_output") | .output' "$TMP/oversized-image.json")" "Use the shell tool to resize or compress" "OpenAI read explains how to shrink an oversized image"
 assert_equal "$(jq '[.input[] | select(.role == "user") | .content[] | select(.type == "input_image")] | length' "$TMP/oversized-image.json")" "0" "Oversized image is not attached to OpenAI"
 
-out=$(printf '/quit\n' | OPENAI_API_KEY=test CURL_BIN="$TMP/curl" "$ROOT/mini-agent.sh" -q -i -C "$TMP" "interactive start")
-assert_contains "$out" "mini-agent openai" "Interactive mode"
+out=$(printf '/quit\n' | OPENAI_API_KEY=test CURL_BIN="$TMP/curl" "$ROOT/miniagent.sh" -q -i -C "$TMP" "interactive start")
+assert_contains "$out" "miniagent openai" "Interactive mode"
 
-out=$(printf '/status\n/compact\n/status\n/quit\n' | OPENAI_API_KEY=test CURL_BIN="$TMP/curl" "$ROOT/mini-agent.sh" -q -i -C "$TMP" "interactive start")
+out=$(printf '/status\n/compact\n/status\n/quit\n' | OPENAI_API_KEY=test CURL_BIN="$TMP/curl" "$ROOT/miniagent.sh" -q -i -C "$TMP" "interactive start")
 assert_contains "$out" "conversation tokens: 100 / 262144" "/status shows exact provider token usage"
 assert_contains "$out" "context compacted" "/compact compacts manually"
 assert_contains "$out" "conversation tokens: unknown" "/status marks post-compaction usage unknown"
@@ -217,7 +223,7 @@ set timeout 15
 log_user 0
 set root $env(EXPECT_ROOT)
 set tmp $env(EXPECT_TMP)
-spawn env OPENAI_API_KEY=test MOCK_DELAY=1 MOCK_CAPTURE=$tmp/queued-interactive.json CURL_BIN=$tmp/curl $root/mini-agent.sh -C $tmp
+spawn env OPENAI_API_KEY=test MOCK_DELAY=1 MOCK_CAPTURE=$tmp/queued-interactive.json CURL_BIN=$tmp/curl $root/miniagent.sh -C $tmp
 expect "> "
 send -- "inspect\r"
 expect "model "
@@ -236,7 +242,7 @@ set timeout 15
 log_user 0
 set root $env(EXPECT_ROOT)
 set tmp $env(EXPECT_TMP)
-spawn env OPENAI_API_KEY=test MOCK_DELAY=1 MOCK_KIND_TRACE=$tmp/ctrl-d-kinds.trace MOCK_NO_TOOLS_CAPTURE=$tmp/ctrl-d-drain.json CURL_BIN=$tmp/curl $root/mini-agent.sh --debug-dir $tmp/ctrl-d-debug -C $tmp
+spawn env OPENAI_API_KEY=test MOCK_DELAY=1 MOCK_KIND_TRACE=$tmp/ctrl-d-kinds.trace MOCK_NO_TOOLS_CAPTURE=$tmp/ctrl-d-drain.json CURL_BIN=$tmp/curl $root/miniagent.sh --debug-dir $tmp/ctrl-d-debug -C $tmp
 expect "> "
 send -- "\004"
 expect "> "
@@ -265,7 +271,7 @@ fi
 : > "$TMP/auto-compact-resolved.trace"
 : > "$TMP/auto-compact-counts.trace"
 : > "$TMP/compacted-continuation.json"
-out=$(OPENAI_API_KEY=test MINI_AGENT_COMPACT_TOKENS=50 MOCK_MULTIPLE_TOOLS=1 MOCK_STICKY_COMPACTION=1 MOCK_KIND_TRACE="$TMP/auto-compact-order.trace" MOCK_COMPACTION_RESOLVED_TRACE="$TMP/auto-compact-resolved.trace" MOCK_COMPACTION_RESULT_COUNTS="$TMP/auto-compact-counts.trace" MOCK_COMPACTED_CONTINUATION_CAPTURE="$TMP/compacted-continuation.json" CURL_BIN="$TMP/curl" "$ROOT/mini-agent.sh" -q -C "$TMP" "inspect")
+out=$(OPENAI_API_KEY=test MINIAGENT_COMPACT_TOKENS=50 MOCK_MULTIPLE_TOOLS=1 MOCK_STICKY_COMPACTION=1 MOCK_KIND_TRACE="$TMP/auto-compact-order.trace" MOCK_COMPACTION_RESOLVED_TRACE="$TMP/auto-compact-resolved.trace" MOCK_COMPACTION_RESULT_COUNTS="$TMP/auto-compact-counts.trace" MOCK_COMPACTED_CONTINUATION_CAPTURE="$TMP/compacted-continuation.json" CURL_BIN="$TMP/curl" "$ROOT/miniagent.sh" -q -C "$TMP" "inspect")
 assert_contains "$out" "openai done" "Mid-turn compaction completes the agent turn"
 assert_equal "$(paste -sd, "$TMP/auto-compact-order.trace")" "normal,compaction,compacted-continuation" "Auto-compaction runs between tool-call rounds"
 assert_equal "$(paste -sd, "$TMP/auto-compact-resolved.trace")" "resolved" "Compaction includes results for active tool calls"
@@ -276,25 +282,25 @@ assert_contains "$continuation" "Checkpoint-generation directives are expired" "
 
 : > "$TMP/anthropic-auto-compact.trace"
 : > "$TMP/anthropic-auto-compact-resolved.trace"
-out=$(ANTHROPIC_API_KEY=test MINI_AGENT_COMPACT_TOKENS=50 MOCK_KIND_TRACE="$TMP/anthropic-auto-compact.trace" MOCK_COMPACTION_RESOLVED_TRACE="$TMP/anthropic-auto-compact-resolved.trace" CURL_BIN="$TMP/curl" "$ROOT/mini-agent.sh" -q -p anthropic -C "$TMP" "inspect")
+out=$(ANTHROPIC_API_KEY=test MINIAGENT_COMPACT_TOKENS=50 MOCK_KIND_TRACE="$TMP/anthropic-auto-compact.trace" MOCK_COMPACTION_RESOLVED_TRACE="$TMP/anthropic-auto-compact-resolved.trace" CURL_BIN="$TMP/curl" "$ROOT/miniagent.sh" -q -p anthropic -C "$TMP" "inspect")
 assert_contains "$out" "anthropic done" "Anthropic mid-turn compaction completes the agent turn"
 assert_equal "$(sed -n '1,2p' "$TMP/anthropic-auto-compact.trace" | paste -sd, -)" "normal,compaction" "Anthropic compacts after recording tool results"
 assert_contains "$(paste -sd, "$TMP/anthropic-auto-compact-resolved.trace")" "resolved" "Anthropic compaction has no open tool use"
 
 : > "$TMP/openrouter-auto-compact.trace"
 : > "$TMP/openrouter-auto-compact-resolved.trace"
-out=$(OPENROUTER_API_KEY=test MINI_AGENT_COMPACT_TOKENS=50 MOCK_KIND_TRACE="$TMP/openrouter-auto-compact.trace" MOCK_COMPACTION_RESOLVED_TRACE="$TMP/openrouter-auto-compact-resolved.trace" CURL_BIN="$TMP/curl" "$ROOT/mini-agent.sh" -q -p openrouter -C "$TMP" "inspect")
+out=$(OPENROUTER_API_KEY=test MINIAGENT_COMPACT_TOKENS=50 MOCK_KIND_TRACE="$TMP/openrouter-auto-compact.trace" MOCK_COMPACTION_RESOLVED_TRACE="$TMP/openrouter-auto-compact-resolved.trace" CURL_BIN="$TMP/curl" "$ROOT/miniagent.sh" -q -p openrouter -C "$TMP" "inspect")
 assert_contains "$out" "openai done" "OpenRouter mid-turn compaction completes the agent turn"
 assert_equal "$(sed -n '1,2p' "$TMP/openrouter-auto-compact.trace" | paste -sd, -)" "normal,compaction" "OpenRouter compacts after recording tool results"
 assert_contains "$(paste -sd, "$TMP/openrouter-auto-compact-resolved.trace")" "resolved" "OpenRouter compaction has no open tool call"
 
 : > "$TMP/empty-compaction.trace"
-out=$(OPENAI_API_KEY=test MINI_AGENT_COMPACT_TOKENS=50 MOCK_EMPTY_COMPACTION=1 MOCK_KIND_TRACE="$TMP/empty-compaction.trace" CURL_BIN="$TMP/curl" "$ROOT/mini-agent.sh" -q -C "$TMP" "inspect" 2>/dev/null)
+out=$(OPENAI_API_KEY=test MINIAGENT_COMPACT_TOKENS=50 MOCK_EMPTY_COMPACTION=1 MOCK_KIND_TRACE="$TMP/empty-compaction.trace" CURL_BIN="$TMP/curl" "$ROOT/miniagent.sh" -q -C "$TMP" "inspect" 2>/dev/null)
 assert_contains "$out" "openai done" "Empty compaction summary does not abort the agent turn"
 assert_equal "$(sed -n '1,3p' "$TMP/empty-compaction.trace" | paste -sd, -)" "normal,compaction,tool-continuation" "Failed compaction preserves the resolved OpenAI continuation"
 
 debug_dir="$TMP/debug-bundle"
-out=$(OPENAI_API_KEY=super-secret-test-value MINI_AGENT_COMPACT_TOKENS=50 MOCK_EMPTY_COMPACTION=1 CURL_BIN="$TMP/curl" "$ROOT/mini-agent.sh" --debug-dir "$debug_dir" -q -C "$TMP" "inspect" 2>"$TMP/debug.stderr")
+out=$(OPENAI_API_KEY=super-secret-test-value MINIAGENT_COMPACT_TOKENS=50 MOCK_EMPTY_COMPACTION=1 CURL_BIN="$TMP/curl" "$ROOT/miniagent.sh" --debug-dir "$debug_dir" -q -C "$TMP" "inspect" 2>"$TMP/debug.stderr")
 assert_contains "$out" "openai done" "Debug mode preserves normal output"
 assert_contains "$(cat "$debug_dir/events.log")" "session_start ppid=" "Debug log records process metadata"
 assert_contains "$(cat "$debug_dir/events.log")" "compaction_summary_failed stage=extract reason=empty_summary" "Debug log records compaction extraction failures"
@@ -306,9 +312,9 @@ assert_equal "$(find "$debug_dir" -name 'api-request.json.*' | wc -l | tr -d ' '
 assert_equal "$(find "$debug_dir" -name 'api-response.json.*' | wc -l | tr -d ' ')" "4" "Debug bundle captures every API response"
 assert_contains "$(cat "$(find "$debug_dir" -name 'tool-shell-stdout.txt.*' | head -1)")" "hello from fixture" "Debug bundle captures raw tool output"
 assert_equal "$(find "$debug_dir" -name 'compact-history-before.json.*' | wc -l | tr -d ' ')" "2" "Debug bundle captures compaction history"
-assert_contains "$(cat "$TMP/debug.stderr")" "mini-agent: debug bundle:" "Debug mode reports the bundle path"
+assert_contains "$(cat "$TMP/debug.stderr")" "miniagent: debug bundle:" "Debug mode reports the bundle path"
 
-help=$($ROOT/mini-agent.sh --help)
+help=$($ROOT/miniagent.sh --help)
 assert_contains "$help" "interactive mode" "Help output"
 assert_contains "$help" "default: 1024" "Help shows default maximum turns"
 assert_contains "$help" "default: 32768" "Help shows default maximum output tokens"
@@ -316,7 +322,7 @@ assert_contains "$help" "default: 262144" "Help shows default compaction thresho
 assert_contains "$help" "--fallback-model" "Help shows fallback model option"
 assert_contains "$help" "--debug" "Help shows debug option"
 
-source "$ROOT/mini-agent.sh"
+source "$ROOT/miniagent.sh"
 assert_equal "$MAX_TURNS" "1024" "Default maximum turns"
 assert_equal "$COMPACT_TOKENS" "262144" "Default compaction threshold"
 C_CYAN=$'\033[36m'; C_RESET=$'\033[0m'
@@ -389,7 +395,7 @@ assert_contains "$(printf '%s' "$HISTORY" | jq -r '.[0].content')" "checkpoint s
 assert_equal "$CONTEXT_TOKENS" "0" "Compaction resets context usage"
 assert_equal "$CONTEXT_TOKENS_KNOWN" "0" "Compaction marks context usage unknown until the next response"
 
-if bash -n "$ROOT/mini-agent.sh"; then ok "Bash syntax"; else not_ok "Bash syntax"; fi
+if bash -n "$ROOT/miniagent.sh"; then ok "Bash syntax"; else not_ok "Bash syntax"; fi
 
 printf '\n%s passed, %s failed\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]
