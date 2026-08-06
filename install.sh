@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# miniagent installer: https://github.com/mikesoylu/miniagent
 set -euo pipefail
 
 SCRIPT_URL="${MINIAGENT_SCRIPT_URL:-https://miniagent.sh}"

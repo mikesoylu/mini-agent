@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # miniagent: a deliberately small, Bash-only coding agent harness.
+# https://github.com/mikesoylu/miniagent
 set -uo pipefail
 VERSION="0.2.0"
 PROVIDER="${MINIAGENT_PROVIDER:-}"
