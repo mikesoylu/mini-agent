@@ -102,7 +102,9 @@ if [[ "$url" == */responses ]]; then
       if [[ -n "${MOCK_READ_PATH:-}" ]]; then
         jq -cn --arg path "$MOCK_READ_PATH" '{id:"resp_1",status:"completed",usage:{total_tokens:50},output:[{type:"function_call",call_id:"call_1",name:"read",arguments:({path:$path}|tojson),status:"completed"}]}' > "$out"
       else
-        if [[ -n "${MOCK_MULTILINE_COMMAND:-}" ]]; then
+        if [[ -n "${MOCK_ABORT_TOOL:-}" ]]; then
+          command="sleep 1; printf 1 > \"\$MINIAGENT_ACTIVE_STOP_FILE\"; sleep 10"
+        elif [[ -n "${MOCK_MULTILINE_COMMAND:-}" ]]; then
           command=$(printf "sleep 1\nprintf 'multiline tool works\\n'")
         else
           command="sed -n '1,5p' sample.txt"
@@ -284,7 +286,7 @@ set timeout 15
 log_user 0
 set root $env(EXPECT_ROOT)
 set tmp $env(EXPECT_TMP)
-spawn env OPENAI_API_KEY=test MOCK_DELAY=1 MOCK_KIND_TRACE=$tmp/ctrl-d-kinds.trace MOCK_NO_TOOLS_CAPTURE=$tmp/ctrl-d-drain.json CURL_BIN=$tmp/curl $root/miniagent.sh --debug-dir $tmp/ctrl-d-debug -C $tmp
+spawn env OPENAI_API_KEY=test MOCK_DELAY=10 CURL_BIN=$tmp/curl $root/miniagent.sh --debug-dir $tmp/ctrl-d-api-debug -C $tmp
 expect "> "
 send -- "\004"
 expect "> "
@@ -295,18 +297,36 @@ send -- "\004"
 expect "stop requested"
 expect "execution stopped"
 expect "> "
-send -- "interesting\r"
-expect "model "
-expect "openai done"
+send -- "/status\r"
+expect "messages: 0"
 expect "> "
 send -- "/quit\r"
 expect eof
 EXPECT_EOF
-  assert_equal "$(find "$TMP/ctrl-d-debug" -name 'api-request.json.*' | wc -l | tr -d ' ')" "4" "Ctrl-D drains the current tool round before accepting the next request"
-  assert_contains "$(cat "$(find "$TMP/ctrl-d-debug" -name 'openai-next-input.json.*' | head -1)")" "shell_call_output" "Ctrl-D resolves current OpenAI shell calls before stopping"
-  assert_equal "$(paste -sd, "$TMP/ctrl-d-kinds.trace")" "normal,tool-continuation,normal,tool-continuation" "Next prompt starts after the stopped tool round is closed"
-  assert_equal "$(jq -r 'has("tools")' "$TMP/ctrl-d-drain.json")" "false" "Ctrl-D drain disables tools"
-  assert_equal "$(jq -r '[.input[].type] | join(",")' "$TMP/ctrl-d-drain.json")" "shell_call_output" "Ctrl-D drain submits the completed tool result"
+  assert_equal "$(find "$TMP/ctrl-d-api-debug" -name 'api-request.json.*' | wc -l | tr -d ' ')" "1" "Ctrl-D aborts an in-flight API request without a continuation"
+  assert_equal "$(find "$TMP/ctrl-d-api-debug" -name 'api-response.json.*' | wc -l | tr -d ' ')" "0" "Aborted API response is discarded"
+
+  EXPECT_ROOT="$ROOT" EXPECT_TMP="$TMP" expect <<'EXPECT_TOOL_ABORT'
+set timeout 15
+log_user 0
+set root $env(EXPECT_ROOT)
+set tmp $env(EXPECT_TMP)
+spawn env OPENAI_API_KEY=test MOCK_ABORT_TOOL=1 MOCK_KIND_TRACE=$tmp/ctrl-d-tool-kinds.trace CURL_BIN=$tmp/curl $root/miniagent.sh --debug-dir $tmp/ctrl-d-tool-debug -C $tmp
+expect "> "
+send -- "inspect\r"
+expect "shell sleep 1"
+expect "(queue) "
+expect "stop requested"
+expect "execution stopped"
+expect "> "
+send -- "/status\r"
+expect "messages: 0"
+expect "> "
+send -- "/quit\r"
+expect eof
+EXPECT_TOOL_ABORT
+  assert_equal "$(find "$TMP/ctrl-d-tool-debug" -name 'api-request.json.*' | wc -l | tr -d ' ')" "1" "Ctrl-D aborts an in-flight tool without a continuation"
+  assert_equal "$(paste -sd, "$TMP/ctrl-d-tool-kinds.trace")" "normal" "Tool abort does not submit a tool result"
 fi
 
 : > "$TMP/auto-compact-order.trace"

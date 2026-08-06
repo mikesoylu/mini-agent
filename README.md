@@ -109,7 +109,7 @@ Run `miniagent` with no task in a terminal, or add `-i` after an initial task. C
 | `/help` | Show interactive commands |
 | `/quit` or `/exit` | End the session |
 
-While an interactive request is running, a live `(queue) ` prompt remains visible for follow-up input. Each complete line entered there is queued and added to the conversation at the next safe boundary: after every tool call in the current provider response has a matching result, and before the next model call. Pressing Ctrl-D requests a graceful stop at the same boundary and then returns to the interactive prompt; it does not end the session. If the current response contains tool calls, miniagent executes all of them, submits their results in one final tool-disabled provider call, waits for that response, and only then stops. This leaves no unresolved tool call to corrupt the next prompt. Use `/quit` or `/exit` to end the session.
+While an interactive request is running, a live `(queue) ` prompt remains visible for follow-up input. Each complete line entered there is queued and added to the conversation at the next safe boundary: after every tool call in the current provider response has a matching result, and before the next model call. Pressing Ctrl-D immediately aborts the active API request or tool call, discards the interrupted turn, and returns to the interactive prompt; it does not end the session. Tool side effects completed before the abort are not rolled back. Use `/quit` or `/exit` to end the session.
 
 After a refusal fallback, `/clear` preserves the active fallback model. `/model` or `/provider` selects a new primary model.
 
