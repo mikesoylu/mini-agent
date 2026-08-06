@@ -45,7 +45,7 @@ Make sure `~/.local/bin` is on your `PATH`. The requirements above must already 
 miniagent "Find and fix the failing tests"
 ```
 
-No API key is required. Without one, miniagent uses the free endpoint at `https://miniagent.sh/api/completions`; provider and model settings are ignored. To use your own provider, set `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or `OPENROUTER_API_KEY`.
+No API key is required. To use your own provider, set `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or `OPENROUTER_API_KEY`.
 
 ## Usage
 
