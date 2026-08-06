@@ -44,6 +44,7 @@ LAST_ANSWER=""
 CURL_BIN="${CURL_BIN:-curl}"
 JQ_BIN="${JQ_BIN:-jq}"
 OPENROUTER_COMPLETIONS_PATH="/chat/completions"
+PUBLIC_PROXY=0
 if [[ -t 2 ]]; then
   C_DIM=$'\033[2m'; C_CYAN=$'\033[36m'; C_RED=$'\033[31m'; C_RESET=$'\033[0m'
 else
@@ -87,7 +88,8 @@ Environment:
   MINIAGENT_DEBUG_DIR
   OPENROUTER_HTTP_REFERER, OPENROUTER_APP_NAME
 
-If no provider API key is set, miniagent uses the free public proxy at miniagent.sh.
+If no provider API key is set, miniagent uses the free public proxy at miniagent.sh
+and ignores provider, model, fallback, and base URL settings.
 
 Interactive commands:
   /model NAME, /provider NAME, /reasoning LEVEL, /compact, /status, /clear, /help, /quit
@@ -253,7 +255,7 @@ init_debug() {
     index=$((index + 1))
   done
   meta=$(printf 'script=%s\npid=%s\nppid=%s\nuid=%s\neuid=%s\nbash_version=%s\ncwd=%s\ntmpdir=%s\nuname=%s\n' \
-    "${BASH_SOURCE[0]}" "$$" "$PPID" "${UID:-unknown}" "${EUID:-unknown}" "${BASH_VERSION:-unknown}" "$PWD" "${TMPDIR:-/tmp}" "$(uname -a 2>/dev/null || printf unknown)")
+    "${BASH_SOURCE[0]:-$0}" "$$" "$PPID" "${UID:-unknown}" "${EUID:-unknown}" "${BASH_VERSION:-unknown}" "$PWD" "${TMPDIR:-/tmp}" "$(uname -a 2>/dev/null || printf unknown)")
   debug_dump session.txt "$meta"
 }
 parse_args() {
@@ -283,10 +285,21 @@ parse_args() {
   if [[ ${#parts[@]} -gt 0 ]]; then PROMPT="${parts[*]}"; fi
 }
 select_provider() {
+  if [[ -z "${OPENAI_API_KEY:-}" && -z "${ANTHROPIC_API_KEY:-}" && -z "${OPENROUTER_API_KEY:-}" ]]; then
+    PUBLIC_PROXY=1
+    PROVIDER="openrouter"
+    MODEL="openrouter/free"
+    FALLBACK_MODEL="none"
+    TURN_MODEL=""
+    OPENROUTER_API_KEY=""
+    API_URL="https://miniagent.sh/api"
+    OPENROUTER_COMPLETIONS_PATH="/completions"
+    return
+  fi
+  PUBLIC_PROXY=0
   if [[ -z "$PROVIDER" ]]; then
     if [[ -n "${OPENAI_API_KEY:-}" ]]; then PROVIDER="openai"
     elif [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then PROVIDER="anthropic"
-    elif [[ -n "${OPENROUTER_API_KEY:-}" ]]; then PROVIDER="openrouter"
     else PROVIDER="openrouter"
     fi
   fi
@@ -304,18 +317,11 @@ select_provider() {
       API_URL="${ANTHROPIC_BASE_URL:-https://api.anthropic.com/v1}"
       ;;
     openrouter)
-      if [[ -n "${OPENROUTER_API_KEY:-}" ]]; then
-        MODEL="${MODEL:-${OPENROUTER_MODEL:-openai/gpt-5.6-sol}}"
-        FALLBACK_MODEL="${FALLBACK_MODEL:-${OPENROUTER_FALLBACK_MODEL:-openai/gpt-5.6-terra}}"
-        API_URL="${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}"
-        OPENROUTER_COMPLETIONS_PATH="/chat/completions"
-      else
-        OPENROUTER_API_KEY=""
-        MODEL="${MODEL:-openrouter/free}"
-        FALLBACK_MODEL="${FALLBACK_MODEL:-none}"
-        API_URL="https://miniagent.sh/api"
-        OPENROUTER_COMPLETIONS_PATH="/completions"
-      fi
+      : "${OPENROUTER_API_KEY:?OPENROUTER_API_KEY is required}"
+      MODEL="${MODEL:-${OPENROUTER_MODEL:-openai/gpt-5.6-sol}}"
+      FALLBACK_MODEL="${FALLBACK_MODEL:-${OPENROUTER_FALLBACK_MODEL:-openai/gpt-5.6-terra}}"
+      API_URL="${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}"
+      OPENROUTER_COMPLETIONS_PATH="/chat/completions"
       ;;
     *) die "unsupported provider: $PROVIDER" ;;
   esac
@@ -1239,8 +1245,20 @@ interactive_loop() {
       /compact) if compact_history; then printf 'context compacted\n'; else printf 'compaction failed\n' >&2; fi ;;
       /status) print_status ;;
       /clear) HISTORY='[]'; OPENAI_PREVIOUS_RESPONSE_ID=""; OPENAI_NEEDS_RESTART=0; CONTEXT_TOKENS=0; CONTEXT_TOKENS_KNOWN=0; printf 'history cleared\n' ;;
-      /model\ *) value=${line#* }; MODEL=$value; TURN_MODEL=""; HISTORY='[]'; OPENAI_PREVIOUS_RESPONSE_ID=""; OPENAI_NEEDS_RESTART=0; CONTEXT_TOKENS=0; CONTEXT_TOKENS_KNOWN=0; printf 'model: %s (history cleared)\n' "$MODEL" ;;
-      /provider\ *) value=${line#* }; PROVIDER=$value; MODEL=""; FALLBACK_MODEL=""; TURN_MODEL=""; HISTORY='[]'; OPENAI_PREVIOUS_RESPONSE_ID=""; OPENAI_NEEDS_RESTART=0; CONTEXT_TOKENS=0; CONTEXT_TOKENS_KNOWN=0; select_provider; printf 'provider: %s, model: %s (history cleared)\n' "$PROVIDER" "$MODEL" ;;
+      /model\ *)
+        if [[ "$PUBLIC_PROXY" -eq 1 ]]; then
+          printf 'model: openrouter/free (fixed by the public proxy)\n'
+        else
+          value=${line#* }; MODEL=$value; TURN_MODEL=""; HISTORY='[]'; OPENAI_PREVIOUS_RESPONSE_ID=""; OPENAI_NEEDS_RESTART=0; CONTEXT_TOKENS=0; CONTEXT_TOKENS_KNOWN=0; printf 'model: %s (history cleared)\n' "$MODEL"
+        fi
+        ;;
+      /provider\ *)
+        if [[ "$PUBLIC_PROXY" -eq 1 ]]; then
+          printf 'provider: openrouter, model: openrouter/free (fixed by the public proxy)\n'
+        else
+          value=${line#* }; PROVIDER=$value; MODEL=""; FALLBACK_MODEL=""; TURN_MODEL=""; HISTORY='[]'; OPENAI_PREVIOUS_RESPONSE_ID=""; OPENAI_NEEDS_RESTART=0; CONTEXT_TOKENS=0; CONTEXT_TOKENS_KNOWN=0; select_provider; printf 'provider: %s, model: %s (history cleared)\n' "$PROVIDER" "$MODEL"
+        fi
+        ;;
       /reasoning\ *) value=${line#* }; REASONING=$value; case "$REASONING" in default|none|minimal|low|medium|high|xhigh|max) printf 'reasoning: %s\n' "$REASONING" ;; *) printf 'invalid reasoning level\n'; REASONING="medium" ;; esac ;;
       /*) printf 'unknown command; use /help\n' ;;
       *)
@@ -1284,7 +1302,7 @@ main() {
   interactive_loop
 }
 
-if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+if [[ "${BASH_SOURCE[0]:-$0}" == "$0" ]]; then
   main "$@"
   status=$?
   debug_log "session_end status=$status"

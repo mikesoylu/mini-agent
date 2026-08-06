@@ -23,26 +23,29 @@ A deliberately small coding-agent harness inspired by mini-swe-agent. It is a si
 
 ## Install
 
-Download the latest version into `~/.local/bin`:
+Run it directly without installing:
 
 ```bash
-mkdir -p "$HOME/.local/bin" && curl -fsSL https://miniagent.sh -o "$HOME/.local/bin/miniagent" && chmod +x "$HOME/.local/bin/miniagent"
+curl -fsSL https://miniagent.sh | bash -s -- "Explain this repository"
 ```
 
-This installs the script only; the requirements above must already be available. Make sure `~/.local/bin` is on your `PATH`, then run `miniagent`.
+Or install it as `miniagent`:
+
+```bash
+mkdir -p "$HOME/.local/bin"
+curl -fsSL https://miniagent.sh -o "$HOME/.local/bin/miniagent"
+chmod +x "$HOME/.local/bin/miniagent"
+```
+
+Make sure `~/.local/bin` is on your `PATH`. The requirements above must already be available.
 
 ## Quick start
 
 ```bash
-# Optionally configure a provider. Without a key, the free proxy is used.
-export OPENAI_API_KEY=...
-# export ANTHROPIC_API_KEY=...
-# export OPENROUTER_API_KEY=...
-
 miniagent "Find and fix the failing tests"
 ```
 
-When several API keys are present, automatic provider selection prefers OpenAI, then Anthropic, then OpenRouter. Pass `--provider` to choose explicitly. With no provider key, miniagent uses `https://miniagent.sh/api/completions`, which forces OpenRouter's `openrouter/free` router and has lower availability and rate limits than a direct provider account.
+No API key is required. Without one, miniagent uses the free endpoint at `https://miniagent.sh/api/completions`; provider and model settings are ignored. To use your own provider, set `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or `OPENROUTER_API_KEY`.
 
 ## Usage
 
@@ -73,9 +76,9 @@ printf 'List the main components' | ./miniagent.sh -p openai
 
 | Option | Description | Default |
 |---|---|---|
-| `-p, --provider NAME` | `openai`, `anthropic`, or `openrouter` | Inferred from API keys |
-| `-m, --model MODEL` | Provider model name | Provider-specific |
-| `--fallback-model MODEL` | Retry a recognized safety refusal once; `none` disables fallback | Provider-specific |
+| `-p, --provider NAME` | `openai`, `anthropic`, or `openrouter` | Inferred from API keys; ignored in no-key mode |
+| `-m, --model MODEL` | Provider model name | Provider-specific; ignored in no-key mode |
+| `--fallback-model MODEL` | Retry a recognized safety refusal once; `none` disables fallback | Provider-specific; ignored in no-key mode |
 | `-r, --reasoning LEVEL` | Reasoning effort | `medium` |
 | `-C, --chdir DIR` | Working directory exposed to the agent | Current directory |
 | `-n, --max-turns N` | Maximum model calls for each user request | `1024` |
@@ -112,7 +115,7 @@ After a refusal fallback, `/clear` preserves the active fallback model. `/model`
 
 ## Configuration
 
-Command-line model and provider values take precedence over their environment-variable equivalents.
+These settings apply when using your own provider key. In no-key mode, provider, model, fallback, and base URL settings are ignored.
 
 ### Provider settings
 
@@ -128,9 +131,9 @@ The default base URLs are the providers' public APIs. `ANTHROPIC_VERSION` defaul
 
 | Variable | Purpose | Default |
 |---|---|---|
-| `MINIAGENT_PROVIDER` | Provider selection | Inferred from API keys; OpenRouter public proxy when none exist |
-| `MINIAGENT_MODEL` | Primary model | Provider-specific |
-| `MINIAGENT_FALLBACK_MODEL` | Refusal fallback model | Provider-specific |
+| `MINIAGENT_PROVIDER` | Provider selection | Inferred from API keys; ignored in no-key mode |
+| `MINIAGENT_MODEL` | Primary model | Provider-specific; ignored in no-key mode |
+| `MINIAGENT_FALLBACK_MODEL` | Refusal fallback model | Provider-specific; ignored in no-key mode |
 | `MINIAGENT_REASONING` | Reasoning effort | `medium` |
 | `MINIAGENT_MAX_TURNS` | Model calls per user request | `1024` |
 | `MINIAGENT_MAX_TOKENS` | Output tokens per model call | `32768` |

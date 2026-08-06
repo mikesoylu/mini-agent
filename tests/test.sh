@@ -164,10 +164,15 @@ assert_contains "$answer" "openai done" "OpenRouter JSON mode"
 assert_equal "$(jq -r '.model' "$TMP/openrouter.json")" "openai/gpt-5.6-sol" "OpenRouter default model"
 assert_equal "$(jq -r '[.tools[].function.name] | join(",")' "$TMP/openrouter.json")" "read,shell" "OpenRouter exposes read and shell only"
 
-out=$(OPENAI_API_KEY= ANTHROPIC_API_KEY= OPENROUTER_API_KEY= MOCK_CAPTURE="$TMP/public-proxy.json" MOCK_URL_CAPTURE="$TMP/public-proxy.url" CURL_BIN="$TMP/curl" "$ROOT/miniagent.sh" -q -C "$TMP" "inspect")
+out=$(OPENAI_API_KEY= ANTHROPIC_API_KEY= OPENROUTER_API_KEY= \
+  MINIAGENT_PROVIDER=anthropic MINIAGENT_MODEL=paid/env MINIAGENT_FALLBACK_MODEL=paid/fallback \
+  OPENROUTER_MODEL=paid/openrouter OPENROUTER_BASE_URL=https://wrong.invalid \
+  MOCK_CAPTURE="$TMP/public-proxy.json" MOCK_URL_CAPTURE="$TMP/public-proxy.url" CURL_BIN="$TMP/curl" \
+  "$ROOT/miniagent.sh" -q --json -p openai -m paid/cli --fallback-model paid/fallback -C "$TMP" "inspect")
 assert_contains "$out" "openai done" "No-key mode uses the public completion proxy"
 assert_equal "$(cat "$TMP/public-proxy.url")" "https://miniagent.sh/api/completions" "No-key mode calls miniagent.sh"
 assert_equal "$(jq -r '.model' "$TMP/public-proxy.json")" "openrouter/free" "No-key mode requests the free model router"
+assert_equal "$(printf '%s' "$out" | jq -r '[.provider,.model,.fallback_model] | join(",")')" "openrouter,openrouter/free,none" "No-key mode ignores provider and model settings"
 
 : > "$TMP/openai-fallback.trace"
 out=$(OPENAI_API_KEY=test MOCK_REFUSE_MODEL=gpt-5.6-sol MOCK_TRACE="$TMP/openai-fallback.trace" CURL_BIN="$TMP/curl" "$ROOT/miniagent.sh" -q -C "$TMP" "inspect")
@@ -316,6 +321,8 @@ assert_contains "$(cat "$TMP/debug.stderr")" "miniagent: debug bundle:" "Debug m
 
 help=$($ROOT/miniagent.sh --help)
 assert_contains "$help" "interactive mode" "Help output"
+piped_help=$(bash -s -- --help < "$ROOT/miniagent.sh")
+assert_contains "$piped_help" "interactive mode" "Piped bash invocation"
 assert_contains "$help" "default: 1024" "Help shows default maximum turns"
 assert_contains "$help" "default: 32768" "Help shows default maximum output tokens"
 assert_contains "$help" "default: 262144" "Help shows default compaction threshold"
