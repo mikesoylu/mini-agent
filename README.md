@@ -1,5 +1,3 @@
-# miniagent.sh
-
 A single Bash script agent harness with minimal dependencies. Built for GitHub Actions, CI/CD pipelines, remote SSH sessions, and similar headless environments. It works with OpenAI, Anthropic, and OpenRouter.
 
 Run an agent loop directly without installing:
