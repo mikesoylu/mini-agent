@@ -3,6 +3,7 @@
 # https://github.com/mikesoylu/miniagent
 set -uo pipefail
 VERSION="0.2.0"
+SCRIPT_SOURCE="${BASH_SOURCE[0]:-}"
 PROVIDER="${MINIAGENT_PROVIDER:-}"
 MODEL="${MINIAGENT_MODEL:-}"
 FALLBACK_MODEL="${MINIAGENT_FALLBACK_MODEL:-}"
@@ -315,6 +316,12 @@ parse_args() {
     esac
   done
   if [[ ${#parts[@]} -gt 0 ]]; then PROMPT="${parts[*]}"; fi
+}
+reattach_piped_script_input() {
+  [[ ! -t 0 && -z "$SCRIPT_SOURCE" ]] || return 0
+  [[ "$INTERACTIVE" -eq 1 || -z "$PROMPT" ]] || return 0
+  [[ -t 1 || -t 2 ]] || die "interactive mode requires a terminal (for Docker, allocate one with -it)"
+  exec </dev/tty || die "could not open the terminal for interactive input"
 }
 select_provider() {
   if [[ -z "${OPENAI_API_KEY:-}" && -z "${ANTHROPIC_API_KEY:-}" && -z "${OPENROUTER_API_KEY:-}" ]]; then
@@ -1311,6 +1318,7 @@ interactive_loop() {
 main() {
   DEBUG_ARGV=("$@")
   parse_args "$@"
+  reattach_piped_script_input
   bootstrap_dependencies
   need_cmd "$CURL_BIN"; need_cmd "$JQ_BIN"; need_cmd base64; need_cmd awk
   if [[ -t 0 && ( "$INTERACTIVE" -eq 1 || -z "$PROMPT" ) ]]; then need_cmd stty; fi

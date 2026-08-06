@@ -223,6 +223,19 @@ assert_contains "$out" "context compacted" "/compact compacts manually"
 assert_contains "$out" "conversation tokens: unknown" "/status marks post-compaction usage unknown"
 
 if command -v expect >/dev/null 2>&1; then
+  EXPECT_ROOT="$ROOT" EXPECT_TMP="$TMP" expect <<'EXPECT_PIPED_SCRIPT'
+set timeout 15
+log_user 0
+set root $env(EXPECT_ROOT)
+set tmp $env(EXPECT_TMP)
+spawn bash -c "cat '$root/miniagent.sh' | env OPENAI_API_KEY=test CURL_BIN='$tmp/curl' bash"
+expect "miniagent openai"
+expect "> "
+send -- "/quit\r"
+expect eof
+EXPECT_PIPED_SCRIPT
+  if [[ $? -eq 0 ]]; then ok "Piped script reconnects to the terminal for interactive mode"; else not_ok "Piped script reconnects to the terminal for interactive mode"; fi
+
   EXPECT_ROOT="$ROOT" EXPECT_TMP="$TMP" expect <<'EXPECT_QUEUE'
 set timeout 15
 log_user 0
@@ -323,6 +336,12 @@ help=$($ROOT/miniagent.sh --help)
 assert_contains "$help" "interactive mode" "Help output"
 piped_help=$(bash -s -- --help < "$ROOT/miniagent.sh")
 assert_contains "$piped_help" "interactive mode" "Piped bash invocation"
+if OPENAI_API_KEY=test JQ_BIN=true bash < "$ROOT/miniagent.sh" >"$TMP/no-tty.stdout" 2>"$TMP/no-tty.stderr"; then
+  not_ok "Piped interactive invocation rejects a missing terminal"
+else
+  ok "Piped interactive invocation rejects a missing terminal"
+fi
+assert_contains "$(cat "$TMP/no-tty.stderr")" "for Docker, allocate one with -it" "Missing terminal error explains Docker TTY allocation"
 assert_contains "$help" "default: 1024" "Help shows default maximum turns"
 assert_contains "$help" "default: 32768" "Help shows default maximum output tokens"
 assert_contains "$help" "default: 262144" "Help shows default compaction threshold"
