@@ -1,6 +1,6 @@
 # mini-agent.sh
 
-A deliberately small coding-agent harness inspired by mini-swe-agent. It is implemented as one Bash script, has no package installation step, and works with OpenAI, Anthropic, and OpenRouter.
+A deliberately small coding-agent harness inspired by mini-swe-agent. It is a single Bash script with no package installation step, built for GitHub Actions, CI/CD pipelines, remote SSH sessions, and similar headless environments. It works with OpenAI, Anthropic, and OpenRouter.
 
 ## Features
 
