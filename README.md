@@ -29,13 +29,15 @@ Run it directly without installing:
 curl -fsSL https://miniagent.sh | bash -s -- "Explain this repository"
 ```
 
+If `jq` is missing, the harness downloads a prebuilt copy to the user cache and continues without installing itself or requiring `sudo`.
+
 Or install it as `miniagent`:
 
 ```bash
 curl -fsSL https://miniagent.sh/install | bash
 ```
 
-The installer detects macOS or Linux, installs missing requirements with the available package manager, and places `miniagent` in `~/.local/bin`.
+The installer detects macOS or Linux, downloads `jq` to `~/.local/bin` when needed, and places `miniagent` alongside it. It does not require `sudo`.
 
 ## Quick start
 

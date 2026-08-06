@@ -43,6 +43,8 @@ COMPACTION_SUMMARY=""
 LAST_ANSWER=""
 CURL_BIN="${CURL_BIN:-curl}"
 JQ_BIN="${JQ_BIN:-jq}"
+INSTALL_URL="${MINIAGENT_INSTALL_URL:-https://miniagent.sh/install}"
+DEPENDENCY_DIR="${MINIAGENT_DEPENDENCY_DIR:-${XDG_CACHE_HOME:-${HOME:-${TMPDIR:-/tmp}}/.cache}/miniagent/bin}"
 OPENROUTER_COMPLETIONS_PATH="/chat/completions"
 PUBLIC_PROXY=0
 if [[ -t 2 ]]; then
@@ -97,6 +99,35 @@ Interactive commands:
 EOF
 }
 need_cmd() { command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"; }
+bootstrap_dependencies() {
+  local command_name
+  local -a required_commands missing_commands
+  required_commands=("$JQ_BIN" base64 awk)
+  if [[ -t 0 && ( "$INTERACTIVE" -eq 1 || -z "$PROMPT" ) ]]; then
+    required_commands+=(stty)
+  fi
+  missing_commands=()
+  for command_name in "${required_commands[@]}"; do
+    command -v "$command_name" >/dev/null 2>&1 || missing_commands+=("$command_name")
+  done
+  [[ ${#missing_commands[@]} -gt 0 ]] || return 0
+
+  # A custom jq path is intentional configuration; installing the system jq
+  # would not repair it, so preserve the normal explicit error in that case.
+  if [[ "$JQ_BIN" != "jq" ]] && ! command -v "$JQ_BIN" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  need_cmd "$CURL_BIN"
+  need_cmd bash
+  info "installing missing requirements: ${missing_commands[*]}"
+  if ! "$CURL_BIN" -fsSL "$INSTALL_URL" | bash -s -- --dependencies-only; then
+    die "could not install required commands: ${missing_commands[*]}"
+  fi
+  if [[ "$JQ_BIN" == "jq" ]] && ! command -v jq >/dev/null 2>&1 && [[ -x "$DEPENDENCY_DIR/jq" ]]; then
+    JQ_BIN="$DEPENDENCY_DIR/jq"
+  fi
+}
 is_uint() { [[ "$1" =~ ^[1-9][0-9]*$ ]]; }
 queue_interactive_message() {
   local line=$1
@@ -1279,6 +1310,7 @@ interactive_loop() {
 main() {
   DEBUG_ARGV=("$@")
   parse_args "$@"
+  bootstrap_dependencies
   need_cmd "$CURL_BIN"; need_cmd "$JQ_BIN"; need_cmd base64; need_cmd awk
   if [[ -t 0 && ( "$INTERACTIVE" -eq 1 || -z "$PROMPT" ) ]]; then need_cmd stty; fi
   init_debug

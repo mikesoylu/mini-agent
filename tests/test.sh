@@ -335,6 +335,15 @@ MINIAGENT_SCRIPT_URL="file://$ROOT/miniagent.sh" \
   bash "$ROOT/install.sh" >/dev/null 2>&1
 if [[ -x "$TMP/install-bin/miniagent" ]]; then ok "Installer creates an executable"; else not_ok "Installer creates an executable"; fi
 assert_equal "$(cmp -s "$ROOT/miniagent.sh" "$TMP/install-bin/miniagent"; printf '%s' "$?")" "0" "Installer downloads the harness"
+MINIAGENT_INSTALL_DIR="$TMP/dependencies-only-bin" \
+  bash "$ROOT/install.sh" --dependencies-only >/dev/null 2>&1
+if [[ ! -e "$TMP/dependencies-only-bin/miniagent" ]]; then ok "Dependencies-only mode does not install the harness"; else not_ok "Dependencies-only mode does not install the harness"; fi
+MINIAGENT_DEPENDENCY_DIR="$TMP/local-dependencies" \
+  MINIAGENT_FORCE_LOCAL_JQ=1 \
+  MINIAGENT_JQ_URL="file://$ROOT/tests/fixtures/jq" \
+  bash "$ROOT/install.sh" --dependencies-only >/dev/null 2>&1
+if [[ -x "$TMP/local-dependencies/jq" ]]; then ok "Dependencies-only mode downloads jq locally"; else not_ok "Dependencies-only mode downloads jq locally"; fi
+assert_contains "$("$TMP/local-dependencies/jq" --version)" "jq-" "Downloaded jq is executable"
 
 source "$ROOT/miniagent.sh"
 assert_equal "$MAX_TURNS" "1024" "Default maximum turns"
