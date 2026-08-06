@@ -26,6 +26,11 @@ while [[ $# -gt 0 ]]; do
 done
 [[ "$body" == "@-" ]] && body=$(cat)
 [[ -n "${MOCK_CAPTURE:-}" ]] && printf '%s' "$body" > "$MOCK_CAPTURE"
+if [[ -n "${MOCK_NO_TOOLS_CAPTURE:-}" ]] &&
+   printf '%s' "$body" | jq -e 'has("tools") | not' >/dev/null 2>&1; then
+  printf '%s' "$body" > "$MOCK_NO_TOOLS_CAPTURE"
+fi
+[[ -z "${MOCK_DELAY:-}" ]] || sleep "$MOCK_DELAY"
 [[ -n "${MOCK_TRACE:-}" ]] && printf '%s' "$body" | jq -r '[.model, (.previous_response_id // "-")] | @tsv' >> "$MOCK_TRACE"
 if [[ -n "${MOCK_HTTP_ERROR_MODEL:-}" ]] && [[ $(printf '%s' "$body" | jq -r '.model') == "$MOCK_HTTP_ERROR_MODEL" ]]; then
   printf '%s' '{"error":{"message":"temporarily overloaded"}}' > "$out"; printf '529'; exit
@@ -206,6 +211,56 @@ assert_contains "$out" "conversation tokens: 100 / 262144" "/status shows exact 
 assert_contains "$out" "context compacted" "/compact compacts manually"
 assert_contains "$out" "conversation tokens: unknown" "/status marks post-compaction usage unknown"
 
+if command -v expect >/dev/null 2>&1; then
+  EXPECT_ROOT="$ROOT" EXPECT_TMP="$TMP" expect <<'EXPECT_QUEUE'
+set timeout 15
+log_user 0
+set root $env(EXPECT_ROOT)
+set tmp $env(EXPECT_TMP)
+spawn env OPENAI_API_KEY=test MOCK_DELAY=1 MOCK_CAPTURE=$tmp/queued-interactive.json CURL_BIN=$tmp/curl $root/mini-agent.sh -C $tmp
+expect "> "
+send -- "inspect\r"
+expect "model "
+expect "(queue) "
+send -- "queued follow-up\r"
+expect "queued message"
+expect "openai done"
+expect "> "
+send -- "/quit\r"
+expect eof
+EXPECT_QUEUE
+  assert_equal "$(jq -r '[.input[] | if .type == "shell_call_output" then "tool_result" elif .role == "user" then .content[0].text else empty end] | join(",")' "$TMP/queued-interactive.json")" "tool_result,queued follow-up" "Interactive input is queued after OpenAI tool results"
+
+  EXPECT_ROOT="$ROOT" EXPECT_TMP="$TMP" expect <<'EXPECT_EOF'
+set timeout 15
+log_user 0
+set root $env(EXPECT_ROOT)
+set tmp $env(EXPECT_TMP)
+spawn env OPENAI_API_KEY=test MOCK_DELAY=1 MOCK_KIND_TRACE=$tmp/ctrl-d-kinds.trace MOCK_NO_TOOLS_CAPTURE=$tmp/ctrl-d-drain.json CURL_BIN=$tmp/curl $root/mini-agent.sh --debug-dir $tmp/ctrl-d-debug -C $tmp
+expect "> "
+send -- "\004"
+expect "> "
+send -- "inspect\r"
+expect "model "
+expect "(queue) "
+send -- "\004"
+expect "stop requested"
+expect "execution stopped"
+expect "> "
+send -- "interesting\r"
+expect "model "
+expect "openai done"
+expect "> "
+send -- "/quit\r"
+expect eof
+EXPECT_EOF
+  assert_equal "$(find "$TMP/ctrl-d-debug" -name 'api-request.json.*' | wc -l | tr -d ' ')" "4" "Ctrl-D drains the current tool round before accepting the next request"
+  assert_contains "$(cat "$(find "$TMP/ctrl-d-debug" -name 'openai-next-input.json.*' | head -1)")" "shell_call_output" "Ctrl-D resolves current OpenAI shell calls before stopping"
+  assert_equal "$(paste -sd, "$TMP/ctrl-d-kinds.trace")" "normal,tool-continuation,normal,tool-continuation" "Next prompt starts after the stopped tool round is closed"
+  assert_equal "$(jq -r 'has("tools")' "$TMP/ctrl-d-drain.json")" "false" "Ctrl-D drain disables tools"
+  assert_equal "$(jq -r '[.input[].type] | join(",")' "$TMP/ctrl-d-drain.json")" "shell_call_output" "Ctrl-D drain submits the completed tool result"
+fi
+
 : > "$TMP/auto-compact-order.trace"
 : > "$TMP/auto-compact-resolved.trace"
 : > "$TMP/auto-compact-counts.trace"
@@ -268,6 +323,26 @@ C_CYAN=$'\033[36m'; C_RESET=$'\033[0m'
 assert_equal "$(interactive_prompt | od -An -t u1 | tr -s ' ' | sed 's/^ //; s/ $//')" "1 27 91 51 54 109 2 62 32 1 27 91 48 109 2" "Interactive prompt marks colors as non-printing for Readline"
 C_CYAN=""; C_RESET=""
 WORKDIR="$TMP"
+PROVIDER=openai
+HISTORY='[{"role":"assistant","content":"[tool call] read"},{"role":"tool","name":"read","content":"file contents"}]'
+INTERACTIVE_QUEUED_MESSAGES='["queued first","queued second"]'
+apply_interactive_messages 1
+queued_input=$(openai_input_with_queued_messages '[{"type":"function_call_output","call_id":"call_1","output":"file contents"}]')
+assert_equal "$(printf '%s' "$queued_input" | jq -r '[.[] | if .type == "function_call_output" then .type else .role end] | join(",")')" "function_call_output,user,user" "OpenAI queues messages after function results"
+assert_equal "$(printf '%s' "$HISTORY" | jq -r '[.[].role] | join(",")')" "assistant,tool,user,user" "OpenAI history records queued messages after tool results"
+
+PROVIDER=anthropic
+HISTORY='[{"role":"assistant","content":[{"type":"tool_use","id":"a1","name":"read","input":{"path":"sample.txt"}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"a1","content":"file contents"}]}]'
+INTERACTIVE_QUEUED_MESSAGES='["queued first","queued second"]'
+apply_interactive_messages 1
+assert_equal "$(printf '%s' "$HISTORY" | jq -r '[.[-1].content[].type] | join(",")')" "tool_result,text,text" "Anthropic queues messages after tool results"
+
+PROVIDER=openrouter
+HISTORY='[{"role":"assistant","content":null,"tool_calls":[{"id":"c1","type":"function","function":{"name":"read","arguments":"{}"}}]},{"role":"tool","tool_call_id":"c1","name":"read","content":"file contents"}]'
+INTERACTIVE_QUEUED_MESSAGES='["queued next"]'
+apply_interactive_messages 1
+assert_equal "$(printf '%s' "$HISTORY" | jq -r '[.[].role] | join(",")')" "assistant,tool,user" "OpenRouter queues messages after tool results"
+
 : > "$TMP/compaction-fallback.trace"
 PROVIDER=anthropic; MODEL=claude-opus-5; TURN_MODEL=$MODEL; FALLBACK_MODEL=claude-sonnet-5; API_URL=https://mock.invalid/v1; ANTHROPIC_API_KEY=test; CURL_BIN="$TMP/curl"
 HISTORY='[{"role":"user","content":"Inspect /tmp/chart.png"},{"role":"assistant","content":"The attached chart shows rising latency."},{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"aW1hZ2U="}},{"type":"text","text":"Image attached: /tmp/chart.png"}]}]'

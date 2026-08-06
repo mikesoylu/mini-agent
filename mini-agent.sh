@@ -22,6 +22,16 @@ DEBUG_LOG=""
 DEBUG_ARGV=()
 OUTPUT_FORMAT="text"
 INTERACTIVE=0
+INTERACTIVE_EXECUTION=0
+INTERACTIVE_CAPTURE_ENABLED=0
+INTERACTIVE_STOP_REQUESTED=0
+INTERACTIVE_INPUT_CLOSED=0
+INTERACTIVE_INPUT_BUFFER=""
+INTERACTIVE_INPUT_PROMPT_VISIBLE=0
+INTERACTIVE_STTY_STATE=""
+INTERACTIVE_QUEUED_MESSAGES='[]'
+INTERACTIVE_QUEUED_BATCH='[]'
+INTERACTIVE_QUEUED_COUNT=0
 QUIET=0
 PROMPT=""
 HISTORY='[]'
@@ -78,10 +88,104 @@ Environment:
 
 Interactive commands:
   /model NAME, /provider NAME, /reasoning LEVEL, /compact, /status, /clear, /help, /quit
+  Ctrl-D stops the active execution at the next safe tool-call boundary.
 EOF
 }
 need_cmd() { command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"; }
 is_uint() { [[ "$1" =~ ^[1-9][0-9]*$ ]]; }
+queue_interactive_message() {
+  local line=$1
+  INTERACTIVE_QUEUED_MESSAGES=$("$JQ_BIN" -cn --argjson queued "$INTERACTIVE_QUEUED_MESSAGES" --arg line "$line" \
+    '$queued + [$line]')
+  history -s "$line" 2>/dev/null || true
+  info "${C_CYAN}queued${C_RESET} message"
+  debug_log "interactive_message_queued value=$(printf '%q' "$line")"
+}
+show_interactive_input_prompt() {
+  [[ "$INTERACTIVE_CAPTURE_ENABLED" -eq 1 && "$INTERACTIVE_INPUT_CLOSED" -eq 0 ]] || return 0
+  printf '\r\033[2K%s(queue) %s%s' "$C_CYAN" "$C_RESET" "$INTERACTIVE_INPUT_BUFFER" >&2
+  INTERACTIVE_INPUT_PROMPT_VISIBLE=1
+}
+hide_interactive_input_prompt() {
+  [[ "$INTERACTIVE_INPUT_PROMPT_VISIBLE" -eq 1 ]] || return 0
+  printf '\r\033[2K' >&2
+  INTERACTIVE_INPUT_PROMPT_VISIBLE=0
+}
+wait_for_process() {
+  local pid=$1 char
+  if [[ "$INTERACTIVE_EXECUTION" -ne 1 || "$INTERACTIVE_CAPTURE_ENABLED" -ne 1 ]]; then wait "$pid"; return; fi
+  show_interactive_input_prompt
+  while kill -0 "$pid" 2>/dev/null; do
+    if [[ "$INTERACTIVE_INPUT_CLOSED" -eq 1 ]]; then hide_interactive_input_prompt; wait "$pid"; return; fi
+    if IFS= read -r -n 1 -t 1 char; then
+      case "$char" in
+        $'\004')
+          if [[ -n "$INTERACTIVE_INPUT_BUFFER" ]]; then
+            printf '\n' >&2
+            queue_interactive_message "$INTERACTIVE_INPUT_BUFFER"
+            INTERACTIVE_INPUT_BUFFER=""
+            show_interactive_input_prompt
+            continue
+          fi
+          INTERACTIVE_STOP_REQUESTED=1
+          INTERACTIVE_INPUT_CLOSED=1
+          hide_interactive_input_prompt
+          info "${C_CYAN}stop${C_RESET} requested; finishing current tool calls"
+          debug_log "interactive_stop_requested source=eof"
+          wait "$pid"
+          return
+          ;;
+        $'\177'|$'\010')
+          if [[ -n "$INTERACTIVE_INPUT_BUFFER" ]]; then
+            INTERACTIVE_INPUT_BUFFER=${INTERACTIVE_INPUT_BUFFER%?}
+            printf '\b \b' >&2
+          fi
+          ;;
+        '')
+          printf '\n' >&2
+          [[ -n "$INTERACTIVE_INPUT_BUFFER" ]] && queue_interactive_message "$INTERACTIVE_INPUT_BUFFER"
+          INTERACTIVE_INPUT_BUFFER=""
+          show_interactive_input_prompt
+          ;;
+        *) INTERACTIVE_INPUT_BUFFER+=$char; printf '%s' "$char" >&2 ;;
+      esac
+      continue
+    fi
+  done
+  hide_interactive_input_prompt
+  wait "$pid"
+}
+restore_interactive_terminal() {
+  hide_interactive_input_prompt
+  if [[ -n "$INTERACTIVE_STTY_STATE" ]]; then stty "$INTERACTIVE_STTY_STATE" 2>/dev/null || true; fi
+  INTERACTIVE_STTY_STATE=""
+  INTERACTIVE_CAPTURE_ENABLED=0
+}
+take_interactive_messages() {
+  INTERACTIVE_QUEUED_BATCH=$INTERACTIVE_QUEUED_MESSAGES
+  INTERACTIVE_QUEUED_MESSAGES='[]'
+  INTERACTIVE_QUEUED_COUNT=$(printf '%s' "$INTERACTIVE_QUEUED_BATCH" | "$JQ_BIN" 'length')
+}
+append_interactive_messages_to_history() {
+  local after_tools=${1:-0}
+  [[ "$INTERACTIVE_QUEUED_COUNT" -gt 0 ]] || return 0
+  if [[ "$PROVIDER" == "anthropic" && "$after_tools" -eq 1 ]]; then
+    HISTORY=$("$JQ_BIN" -cn --argjson history "$HISTORY" --argjson queued "$INTERACTIVE_QUEUED_BATCH" \
+      '$history | .[-1].content += [$queued[] | {type:"text",text:.}]')
+  elif [[ "$PROVIDER" == "anthropic" ]]; then
+    HISTORY=$("$JQ_BIN" -cn --argjson history "$HISTORY" --argjson queued "$INTERACTIVE_QUEUED_BATCH" \
+      '$history + [{role:"user",content:[$queued[] | {type:"text",text:.}]}]')
+  else
+    HISTORY=$("$JQ_BIN" -cn --argjson history "$HISTORY" --argjson queued "$INTERACTIVE_QUEUED_BATCH" \
+      '$history + [$queued[] | {role:"user",content:.}]')
+  fi
+  debug_log "interactive_messages_applied provider=$PROVIDER count=$INTERACTIVE_QUEUED_COUNT after_tools=$after_tools"
+}
+apply_interactive_messages() {
+  local after_tools=${1:-0}
+  take_interactive_messages
+  append_interactive_messages_to_history "$after_tools"
+}
 debug_log() {
   [[ -n "$DEBUG_LOG" ]] || return 0
   printf '%s pid=%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$$" "$*" >> "$DEBUG_LOG"
@@ -293,20 +397,24 @@ tools_anthropic() {
   tools_compatible | "$JQ_BIN" -c '[.[] | {name:.function.name,description:.function.description,input_schema:.function.parameters}]'
 }
 api_request() {
-  local url=$1 key_header=$2 key=$3 body=$4 response_file status curl_status
+  local url=$1 key_header=$2 key=$3 body=$4 response_file status_file status curl_status request_pid
   shift 4
   debug_log "api_request_start provider=$PROVIDER model=${TURN_MODEL:-$MODEL} url=$url previous_response_id=${OPENAI_PREVIOUS_RESPONSE_ID:-none} body_bytes=$(printf '%s' "$body" | wc -c | tr -d ' ') extra_header_args=$#"
   debug_dump api-request.json "$body"
   response_file=$(mktemp "${TMPDIR:-/tmp}/mini-agent-response.XXXXXX") || return 1
-  status=$("$CURL_BIN" -sS --connect-timeout 20 --max-time "$API_TIMEOUT" \
+  status_file=$(mktemp "${TMPDIR:-/tmp}/mini-agent-status.XXXXXX") || { rm -f "$response_file"; return 1; }
+  "$CURL_BIN" -sS --connect-timeout 20 --max-time "$API_TIMEOUT" \
     -o "$response_file" -w '%{http_code}' -X POST "$url" \
     -H 'content-type: application/json' -H "$key_header: $key" "$@" \
-    --data-binary @- <<< "$body")
+    --data-binary @- <<< "$body" > "$status_file" &
+  request_pid=$!
+  wait_for_process "$request_pid"
   curl_status=$?
+  status=$(<"$status_file")
   API_RESPONSE=$(<"$response_file")
   debug_dump api-response.json "$API_RESPONSE"
   debug_log "api_request_end provider=$PROVIDER model=${TURN_MODEL:-$MODEL} url=$url http_status=$status curl_status=$curl_status response_bytes=$(wc -c < "$response_file" | tr -d ' ')"
-  rm -f "$response_file"
+  rm -f "$response_file" "$status_file"
   if [[ $curl_status -ne 0 ]]; then
     printf 'network error (curl exit %s)\n' "$curl_status" >&2
     return 1
@@ -322,18 +430,22 @@ api_request() {
   fi
 }
 call_openrouter() {
-  local body tools reason_args='{}' key url
+  local tool_mode=${1:-enabled} body tools reason_args='{}' tool_args='{}' key url
   local extra_headers=(-H "X-Title: ${OPENROUTER_APP_NAME:-mini-agent}")
-  tools=$(tools_compatible)
+  if [[ "$tool_mode" == "enabled" ]]; then
+    tools=$(tools_compatible)
+    tool_args=$("$JQ_BIN" -cn --argjson tools "$tools" \
+      '{tools:$tools,tool_choice:"auto",parallel_tool_calls:false}')
+  fi
   if [[ "$REASONING" != "default" ]]; then
     local effort=$REASONING
     [[ "$effort" == "max" ]] && effort="xhigh"
     reason_args=$("$JQ_BIN" -cn --arg e "$effort" '{reasoning:{effort:$e}}')
   fi
   body=$("$JQ_BIN" -cn --arg model "${TURN_MODEL:-$MODEL}" --arg system "$(system_prompt)" \
-    --slurpfile history <(printf '%s\n' "$HISTORY") --argjson tools "$tools" --argjson extra "$reason_args" \
+    --slurpfile history <(printf '%s\n' "$HISTORY") --argjson tool_args "$tool_args" --argjson extra "$reason_args" \
     --argjson max "$MAX_TOKENS" \
-    '{model:$model,messages:([{role:"system",content:$system}] + $history[0]),tools:$tools,tool_choice:"auto",parallel_tool_calls:false,max_completion_tokens:$max} + $extra')
+    '({model:$model,messages:([{role:"system",content:$system}] + $history[0]),max_completion_tokens:$max} + $tool_args + $extra)')
   key=$OPENROUTER_API_KEY; url="$API_URL/chat/completions"
   [[ -n "${OPENROUTER_HTTP_REFERER:-}" ]] && extra_headers+=( -H "HTTP-Referer: $OPENROUTER_HTTP_REFERER" )
   [[ -n "${OPENROUTER_APP_NAME:-}" ]] && extra_headers+=( -H "X-Title: $OPENROUTER_APP_NAME" )
@@ -344,8 +456,12 @@ call_openrouter() {
   fi
 }
 call_openai_responses() {
-  local input=$1 body tools reason_args='{}' previous_args='{}' effort
-  tools=$(tools_openai)
+  local input=$1 tool_mode=${2:-enabled} body tools reason_args='{}' previous_args='{}' tool_args='{}' effort
+  if [[ "$tool_mode" == "enabled" ]]; then
+    tools=$(tools_openai)
+    tool_args=$("$JQ_BIN" -cn --argjson tools "$tools" \
+      '{tools:$tools,tool_choice:"auto",parallel_tool_calls:false}')
+  fi
   if [[ "$REASONING" != "default" ]]; then
     effort=$REASONING
     [[ "$effort" == "minimal" ]] && effort="low"
@@ -356,8 +472,8 @@ call_openai_responses() {
   fi
   body=$("$JQ_BIN" -cn --arg model "${TURN_MODEL:-$MODEL}" --arg instructions "$(system_prompt)" \
     --slurpfile input <(printf '%s\n' "$input") --argjson reason "$reason_args" \
-    --argjson previous "$previous_args" --argjson tools "$tools" --argjson max "$MAX_TOKENS" \
-    '{model:$model,instructions:$instructions,input:$input[0],tools:$tools,tool_choice:"auto",parallel_tool_calls:false,max_output_tokens:$max} + $reason + $previous')
+    --argjson previous "$previous_args" --argjson tool_args "$tool_args" --argjson max "$MAX_TOKENS" \
+    '({model:$model,instructions:$instructions,input:$input[0],max_output_tokens:$max} + $tool_args + $reason + $previous)')
   api_request "$API_URL/responses" "authorization" "Bearer $OPENAI_API_KEY" "$body" || return 1
   if printf '%s' "$API_RESPONSE" | "$JQ_BIN" -e '.error != null or .status == "failed"' >/dev/null 2>&1; then
     printf 'API error: %s\n' "$(printf '%s' "$API_RESPONSE" | "$JQ_BIN" -r '.error.message // .error // "response failed"')" >&2
@@ -367,8 +483,11 @@ call_openai_responses() {
   [[ -n "$OPENAI_PREVIOUS_RESPONSE_ID" ]] || { printf 'API response missing id\n' >&2; return 1; }
 }
 call_anthropic() {
-  local body tools thinking='{}'
-  tools=$(tools_anthropic)
+  local tool_mode=${1:-enabled} body tools thinking='{}' tool_args='{}'
+  if [[ "$tool_mode" == "enabled" ]]; then
+    tools=$(tools_anthropic)
+    tool_args=$("$JQ_BIN" -cn --argjson tools "$tools" '{tools:$tools,tool_choice:{type:"auto"}}')
+  fi
   case "$REASONING" in
     default) thinking='{}' ;;
     none) thinking='{"thinking":{"type":"disabled"}}' ;;
@@ -379,9 +498,9 @@ call_anthropic() {
       ;;
   esac
   body=$("$JQ_BIN" -cn --arg model "${TURN_MODEL:-$MODEL}" --arg system "$(system_prompt)" \
-    --slurpfile history <(printf '%s\n' "$HISTORY") --argjson tools "$tools" --argjson extra "$thinking" \
+    --slurpfile history <(printf '%s\n' "$HISTORY") --argjson tool_args "$tool_args" --argjson extra "$thinking" \
     --argjson max "$MAX_TOKENS" \
-    '{model:$model,system:$system,messages:$history[0],tools:$tools,tool_choice:{type:"auto"},max_tokens:$max} + $extra')
+    '({model:$model,system:$system,messages:$history[0],max_tokens:$max} + $tool_args + $extra)')
   api_request "$API_URL/messages" "x-api-key" "$ANTHROPIC_API_KEY" "$body" \
     -H "anthropic-version: ${ANTHROPIC_VERSION:-2023-06-01}" || return 1
   if printf '%s' "$API_RESPONSE" | "$JQ_BIN" -e '.type == "error"' >/dev/null 2>&1; then
@@ -413,6 +532,7 @@ call_with_fallback() {
   if [[ "$status" -ne 0 ]] && ! response_is_refusal; then return "$status"; fi
   response_is_refusal || return 0
   refused=${TURN_MODEL:-$MODEL}; reason=$(refusal_reason)
+  [[ "$INTERACTIVE_STOP_REQUESTED" -eq 0 ]] || return 0
   if [[ -z "$FALLBACK_MODEL" || "$FALLBACK_MODEL" == "none" || "$FALLBACK_MODEL" == "$refused" ]]; then
     OPENAI_PREVIOUS_RESPONSE_ID=$previous; LAST_ANSWER="Model $refused refused the request: $reason"; printf '%s\n' "$LAST_ANSWER" >&2; return 1
   fi
@@ -517,6 +637,7 @@ call_compaction_summary() {
   esac
   if response_is_refusal; then
     refused=${TURN_MODEL:-$MODEL}; reason=$(refusal_reason)
+    [[ "$INTERACTIVE_STOP_REQUESTED" -eq 0 ]] || return 1
     if [[ -n "$FALLBACK_MODEL" && "$FALLBACK_MODEL" != "none" && "$FALLBACK_MODEL" != "$refused" ]]; then
       info "${C_CYAN}fallback${C_RESET} $refused refused compaction: $reason; retrying with $FALLBACK_MODEL"
       TURN_MODEL=$FALLBACK_MODEL; call_compaction_summary "$prompt" "$pending"; return
@@ -586,6 +707,12 @@ openai_history_input() {
   conversation=$(printf '%s' "$HISTORY" | serialization_prompt)
   "$JQ_BIN" -cn --arg text "Continue from this compacted conversation context:\n\n$conversation" \
     '[{role:"user",content:[{type:"input_text",text:$text}]}]'
+}
+
+openai_input_with_queued_messages() {
+  local pending=$1
+  "$JQ_BIN" -cn --argjson pending "$pending" --argjson queued "$INTERACTIVE_QUEUED_BATCH" \
+    '$pending + [$queued[] | {role:"user",content:[{type:"input_text",text:.}]}]'
 }
 
 record_openai_response() {
@@ -672,11 +799,13 @@ truncate_file() {
 }
 
 run_shell() {
-  local command_text=$1 tmp status output timer=()
+  local command_text=$1 tmp status output command_pid timer=()
   tmp=$(mktemp "${TMPDIR:-/tmp}/mini-agent-tool.XXXXXX") || return 1
   if command -v timeout >/dev/null 2>&1; then timer=(timeout "$TOOL_TIMEOUT")
   elif command -v gtimeout >/dev/null 2>&1; then timer=(gtimeout "$TOOL_TIMEOUT"); fi
-  (cd "$WORKDIR" && "${timer[@]}" bash -lc "$command_text") > "$tmp" 2>&1
+  (cd "$WORKDIR" && "${timer[@]}" bash -lc "$command_text") < /dev/null > "$tmp" 2>&1 &
+  command_pid=$!
+  wait_for_process "$command_pid"
   status=$?
   debug_log "tool_shell_compatible command=$(printf '%q' "$command_text") status=$status"
   debug_dump_file tool-shell-compatible-output.txt "$tmp"
@@ -688,7 +817,7 @@ run_shell() {
 }
 
 run_native_command() {
-  local command_text=$1 requested_limit=$2 timeout_seconds=$3 out_file err_file status stdout stderr cap timer=()
+  local command_text=$1 requested_limit=$2 timeout_seconds=$3 out_file err_file status stdout stderr cap command_pid timer=()
   out_file=$(mktemp "${TMPDIR:-/tmp}/mini-agent-stdout.XXXXXX") || return 1
   err_file=$(mktemp "${TMPDIR:-/tmp}/mini-agent-stderr.XXXXXX") || { rm -f "$out_file"; return 1; }
   cap=$requested_limit
@@ -699,7 +828,9 @@ run_native_command() {
   if command -v timeout >/dev/null 2>&1; then timer=(timeout "$timeout_seconds")
   elif command -v gtimeout >/dev/null 2>&1; then timer=(gtimeout "$timeout_seconds"); fi
   info "${C_CYAN}shell${C_RESET} $command_text"
-  (cd "$WORKDIR" && "${timer[@]}" bash -lc "$command_text") > "$out_file" 2> "$err_file"
+  (cd "$WORKDIR" && "${timer[@]}" bash -lc "$command_text") < /dev/null > "$out_file" 2> "$err_file" &
+  command_pid=$!
+  wait_for_process "$command_pid"
   status=$?
   debug_log "tool_shell command=$(printf '%q' "$command_text") status=$status requested_limit=$requested_limit effective_limit=$cap timeout_seconds=$timeout_seconds"
   debug_dump_file tool-shell-stdout.txt "$out_file"
@@ -842,6 +973,32 @@ process_anthropic_calls() {
   debug_dump history-after-anthropic-tools.json "$HISTORY"
 }
 
+finish_stopped_tool_round() {
+  local input=${1:-'[]'} assistant_content
+  debug_log "interactive_stop_drain_start provider=$PROVIDER"
+  case "$PROVIDER" in
+    openai)
+      debug_dump interactive-stop-drain-input-openai.json "$input"
+      call_openai_responses "$input" disabled || return 1
+      record_openai_response
+      ;;
+    anthropic)
+      call_anthropic disabled || return 1
+      assistant_content=$(printf '%s' "$API_RESPONSE" | "$JQ_BIN" -c '.content')
+      HISTORY=$("$JQ_BIN" -cs '.[0] + [{role:"assistant",content:.[1]}]' \
+        <(printf '%s\n' "$HISTORY") <(printf '%s\n' "$assistant_content"))
+      ;;
+    openrouter)
+      call_openrouter disabled || return 1
+      assistant_content=$(printf '%s' "$API_RESPONSE" | "$JQ_BIN" -c '.choices[0].message')
+      HISTORY=$("$JQ_BIN" -cs '.[0] + [.[1]]' \
+        <(printf '%s\n' "$HISTORY") <(printf '%s\n' "$assistant_content"))
+      ;;
+  esac
+  CONTEXT_TOKENS=$(response_context_tokens); CONTEXT_TOKENS_KNOWN=1
+  debug_log "interactive_stop_drain_complete provider=$PROVIDER previous_response_id=${OPENAI_PREVIOUS_RESPONSE_ID:-none}"
+}
+
 agent_turn_openai() {
   local user_text=$1 turn call_count text input user_message
   input=$(printf '%s' "$user_text" | "$JQ_BIN" -Rsc '[{role:"user",content:[{type:"input_text",text:.}]}]')
@@ -865,11 +1022,33 @@ agent_turn_openai() {
     if [[ "$call_count" -gt 0 ]]; then
       process_openai_tool_calls
       input=$OPENAI_NEXT_INPUT
+      if [[ "$INTERACTIVE_STOP_REQUESTED" -eq 1 ]]; then
+        finish_stopped_tool_round "$input" || return 1
+        LAST_ANSWER=""
+        return 0
+      fi
+      apply_interactive_messages 1
+      input=$(openai_input_with_queued_messages "$input")
       auto_compact "$input" 1
+      if [[ "$INTERACTIVE_STOP_REQUESTED" -eq 1 ]]; then LAST_ANSWER=$text; return 0; fi
+      apply_interactive_messages
+      input=$(openai_input_with_queued_messages "$input")
     else
-      LAST_ANSWER=$text
-      auto_compact
-      return 0
+      if [[ "$INTERACTIVE_STOP_REQUESTED" -eq 1 ]]; then LAST_ANSWER=$text; return 0; fi
+      apply_interactive_messages
+      if [[ "$INTERACTIVE_QUEUED_COUNT" -gt 0 ]]; then
+        input=$(openai_input_with_queued_messages '[]')
+        auto_compact "$input" 1
+        if [[ "$INTERACTIVE_STOP_REQUESTED" -eq 1 ]]; then LAST_ANSWER=$text; return 0; fi
+        apply_interactive_messages
+        input=$(openai_input_with_queued_messages "$input")
+      else
+        LAST_ANSWER=$text
+        auto_compact
+        if [[ "$INTERACTIVE_STOP_REQUESTED" -eq 1 ]]; then return 0; fi
+        apply_interactive_messages
+        if [[ "$INTERACTIVE_QUEUED_COUNT" -gt 0 ]]; then input=$(openai_input_with_queued_messages '[]'); else return 0; fi
+      fi
     fi
     turn=$((turn + 1))
   done
@@ -898,12 +1077,31 @@ agent_turn() {
       text=$(printf '%s' "$API_RESPONSE" | "$JQ_BIN" -r '[.content[] | select(.type == "text") | .text] | join("\n")')
       if [[ "$call_count" -gt 0 ]]; then
         process_anthropic_calls
+        if [[ "$INTERACTIVE_STOP_REQUESTED" -eq 1 ]]; then
+          finish_stopped_tool_round || return 1
+          LAST_ANSWER=""
+          return 0
+        fi
+        apply_interactive_messages 1
         auto_compact '[]' 1
+        if [[ "$INTERACTIVE_STOP_REQUESTED" -eq 1 ]]; then LAST_ANSWER=$text; return 0; fi
+        apply_interactive_messages
       else
         assistant_content=$(printf '%s' "$API_RESPONSE" | "$JQ_BIN" -c '.content')
         HISTORY=$("$JQ_BIN" -cs '.[0] + [{role:"assistant",content:.[1]}]' \
           <(printf '%s\n' "$HISTORY") <(printf '%s\n' "$assistant_content"))
-        LAST_ANSWER=$text; auto_compact; return 0
+        if [[ "$INTERACTIVE_STOP_REQUESTED" -eq 1 ]]; then LAST_ANSWER=$text; return 0; fi
+        apply_interactive_messages
+        if [[ "$INTERACTIVE_QUEUED_COUNT" -gt 0 ]]; then
+          auto_compact '[]' 1
+          if [[ "$INTERACTIVE_STOP_REQUESTED" -eq 1 ]]; then LAST_ANSWER=$text; return 0; fi
+          apply_interactive_messages
+        else
+          LAST_ANSWER=$text; auto_compact
+          if [[ "$INTERACTIVE_STOP_REQUESTED" -eq 1 ]]; then return 0; fi
+          apply_interactive_messages
+          [[ "$INTERACTIVE_QUEUED_COUNT" -gt 0 ]] || return 0
+        fi
       fi
     else
       call_with_fallback call_openrouter || return 1
@@ -912,12 +1110,31 @@ agent_turn() {
       text=$(printf '%s' "$API_RESPONSE" | "$JQ_BIN" -r '.choices[0].message.content // ""')
       if [[ "$call_count" -gt 0 ]]; then
         process_openai_calls
+        if [[ "$INTERACTIVE_STOP_REQUESTED" -eq 1 ]]; then
+          finish_stopped_tool_round || return 1
+          LAST_ANSWER=""
+          return 0
+        fi
+        apply_interactive_messages 1
         auto_compact '[]' 1
+        if [[ "$INTERACTIVE_STOP_REQUESTED" -eq 1 ]]; then LAST_ANSWER=$text; return 0; fi
+        apply_interactive_messages
       else
         assistant_content=$(printf '%s' "$API_RESPONSE" | "$JQ_BIN" -c '.choices[0].message')
         HISTORY=$("$JQ_BIN" -cs '.[0] + [.[1]]' \
           <(printf '%s\n' "$HISTORY") <(printf '%s\n' "$assistant_content"))
-        LAST_ANSWER=$text; auto_compact; return 0
+        if [[ "$INTERACTIVE_STOP_REQUESTED" -eq 1 ]]; then LAST_ANSWER=$text; return 0; fi
+        apply_interactive_messages
+        if [[ "$INTERACTIVE_QUEUED_COUNT" -gt 0 ]]; then
+          auto_compact '[]' 1
+          if [[ "$INTERACTIVE_STOP_REQUESTED" -eq 1 ]]; then LAST_ANSWER=$text; return 0; fi
+          apply_interactive_messages
+        else
+          LAST_ANSWER=$text; auto_compact
+          if [[ "$INTERACTIVE_STOP_REQUESTED" -eq 1 ]]; then return 0; fi
+          apply_interactive_messages
+          [[ "$INTERACTIVE_QUEUED_COUNT" -gt 0 ]] || return 0
+        fi
       fi
     fi
     turn=$((turn + 1))
@@ -960,6 +1177,7 @@ interactive_help() {
 /clear            clear conversation history
 /help             show these commands
 /quit             exit
+Ctrl-D            stop the active execution after resolving current tool calls
 EOF
 }
 
@@ -971,12 +1189,36 @@ interactive_prompt() {
   fi
 }
 
+run_interactive_agent_turn() {
+  local user_text=$1 status=0
+  INTERACTIVE_EXECUTION=1
+  INTERACTIVE_STOP_REQUESTED=0
+  INTERACTIVE_INPUT_CLOSED=0
+  INTERACTIVE_INPUT_BUFFER=""
+  INTERACTIVE_INPUT_PROMPT_VISIBLE=0
+  INTERACTIVE_QUEUED_MESSAGES='[]'
+  INTERACTIVE_QUEUED_BATCH='[]'
+  INTERACTIVE_QUEUED_COUNT=0
+  if [[ -t 0 ]]; then
+    INTERACTIVE_STTY_STATE=$(stty -g 2>/dev/null || true)
+    if [[ -n "$INTERACTIVE_STTY_STATE" ]] && stty -echo eof undef 2>/dev/null; then
+      INTERACTIVE_CAPTURE_ENABLED=1
+      trap 'restore_interactive_terminal' EXIT
+    fi
+  fi
+  agent_turn "$user_text" || status=$?
+  restore_interactive_terminal
+  trap - EXIT
+  INTERACTIVE_EXECUTION=0
+  return "$status"
+}
+
 interactive_loop() {
   local line value prompt
   printf 'mini-agent %s · %s · reasoning %s · %s\n' "$PROVIDER" "$MODEL" "$REASONING" "$WORKDIR"
   prompt=$(interactive_prompt)
   while true; do
-    IFS= read -e -r -p "$prompt" line || { printf '\n'; break; }
+    IFS= read -e -r -p "$prompt" line || { printf '\n'; if [[ -t 0 ]]; then continue; else break; fi; }
     [[ -n "$line" ]] || continue
     debug_log "interactive_input value=$(printf '%q' "$line")"
     history -s "$line"
@@ -990,7 +1232,17 @@ interactive_loop() {
       /provider\ *) value=${line#* }; PROVIDER=$value; MODEL=""; FALLBACK_MODEL=""; TURN_MODEL=""; HISTORY='[]'; OPENAI_PREVIOUS_RESPONSE_ID=""; OPENAI_NEEDS_RESTART=0; CONTEXT_TOKENS=0; CONTEXT_TOKENS_KNOWN=0; select_provider; printf 'provider: %s, model: %s (history cleared)\n' "$PROVIDER" "$MODEL" ;;
       /reasoning\ *) value=${line#* }; REASONING=$value; case "$REASONING" in default|none|minimal|low|medium|high|xhigh|max) printf 'reasoning: %s\n' "$REASONING" ;; *) printf 'invalid reasoning level\n'; REASONING="medium" ;; esac ;;
       /*) printf 'unknown command; use /help\n' ;;
-      *) if agent_turn "$line"; then print_answer; else printf 'request failed\n' >&2; fi ;;
+      *)
+        if run_interactive_agent_turn "$line"; then
+          [[ -n "$LAST_ANSWER" ]] && print_answer
+        else
+          printf 'request failed\n' >&2
+        fi
+        if [[ "$INTERACTIVE_STOP_REQUESTED" -eq 1 ]]; then
+          INTERACTIVE_STOP_REQUESTED=0
+          printf 'execution stopped\n'
+        fi
+        ;;
     esac
   done
 }
@@ -999,15 +1251,24 @@ main() {
   DEBUG_ARGV=("$@")
   parse_args "$@"
   need_cmd "$CURL_BIN"; need_cmd "$JQ_BIN"; need_cmd base64; need_cmd awk
+  if [[ -t 0 && ( "$INTERACTIVE" -eq 1 || -z "$PROMPT" ) ]]; then need_cmd stty; fi
   init_debug
   select_provider; validate_config
   debug_log "configured provider=$PROVIDER model=$MODEL fallback_model=$FALLBACK_MODEL reasoning=$REASONING workdir=$WORKDIR api_url=$API_URL max_turns=$MAX_TURNS max_tokens=$MAX_TOKENS compact_tokens=$COMPACT_TOKENS compact_max_tokens=$COMPACT_MAX_TOKENS max_tool_output=$MAX_TOOL_OUTPUT tool_timeout=$TOOL_TIMEOUT api_timeout=$API_TIMEOUT"
   debug_state configured
   if [[ -z "$PROMPT" && ! -t 0 ]]; then PROMPT=$(cat); fi
   if [[ -n "$PROMPT" ]]; then
-    agent_turn "$PROMPT" || { [[ -n "$LAST_ANSWER" ]] && print_answer; return 1; }
-    print_answer
+    if [[ "$INTERACTIVE" -eq 1 ]]; then
+      run_interactive_agent_turn "$PROMPT" || { [[ -n "$LAST_ANSWER" ]] && print_answer; return 1; }
+    else
+      agent_turn "$PROMPT" || { [[ -n "$LAST_ANSWER" ]] && print_answer; return 1; }
+    fi
+    [[ -n "$LAST_ANSWER" ]] && print_answer
     [[ "$INTERACTIVE" -eq 1 ]] || return 0
+    if [[ "$INTERACTIVE_STOP_REQUESTED" -eq 1 ]]; then
+      INTERACTIVE_STOP_REQUESTED=0
+      printf 'execution stopped\n'
+    fi
   fi
   interactive_loop
 }

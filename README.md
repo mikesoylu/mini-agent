@@ -17,7 +17,7 @@ A deliberately small coding-agent harness inspired by mini-swe-agent. It is a si
 
 - Bash 3.2+
 - `curl` and `jq`
-- Standard Unix utilities used by the harness: `awk`, `base64`, `cat`, `chmod`, `cp`, `date`, `find`, `head`, `mkdir`, `mktemp`, `rm`, `sort`, `tail`, `tr`, `uname`, and `wc`
+- Standard Unix utilities used by the harness: `awk`, `base64`, `cat`, `chmod`, `cp`, `date`, `find`, `head`, `mkdir`, `mktemp`, `rm`, `sort`, `stty`, `tail`, `tr`, `uname`, and `wc`
 - Standard agent editing and inspection utilities: `sed` and `nl`
 - Optional: `file` for MIME detection, `strings` for extracting text from unknown binary files, and GNU `timeout` (or `gtimeout`) to enforce command timeouts
 
@@ -105,6 +105,8 @@ Run `./mini-agent.sh` with no task in a terminal, or add `-i` after an initial t
 | `/clear` | Clear conversation history and token state |
 | `/help` | Show interactive commands |
 | `/quit` or `/exit` | End the session |
+
+While an interactive request is running, a live `(queue) ` prompt remains visible for follow-up input. Each complete line entered there is queued and added to the conversation at the next safe boundary: after every tool call in the current provider response has a matching result, and before the next model call. Pressing Ctrl-D requests a graceful stop at the same boundary and then returns to the interactive prompt; it does not end the session. If the current response contains tool calls, mini-agent executes all of them, submits their results in one final tool-disabled provider call, waits for that response, and only then stops. This leaves no unresolved tool call to corrupt the next prompt. Use `/quit` or `/exit` to end the session.
 
 After a refusal fallback, `/clear` preserves the active fallback model. `/model` or `/provider` selects a new primary model.
 
