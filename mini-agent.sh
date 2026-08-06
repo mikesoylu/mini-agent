@@ -833,12 +833,20 @@ interactive_help() {
 EOF
 }
 
+interactive_prompt() {
+  if [[ -n "$C_CYAN" ]]; then
+    printf '\001%s\002> \001%s\002' "$C_CYAN" "$C_RESET"
+  else
+    printf '> '
+  fi
+}
+
 interactive_loop() {
-  local line value
+  local line value prompt
   printf 'mini-agent %s · %s · reasoning %s · %s\n' "$PROVIDER" "$MODEL" "$REASONING" "$WORKDIR"
+  prompt=$(interactive_prompt)
   while true; do
-    printf '%s> %s' "$C_CYAN" "$C_RESET"
-    IFS= read -e -r line || { printf '\n'; break; }
+    IFS= read -e -r -p "$prompt" line || { printf '\n'; break; }
     [[ -n "$line" ]] || continue
     history -s "$line"
     case "$line" in
