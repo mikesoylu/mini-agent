@@ -6,8 +6,8 @@ A deliberately small coding-agent harness inspired by mini-swe-agent. It is a si
 
 - Runs complete agent loops: the model can inspect files, execute commands, edit code, run tests, and continue until it produces a final answer.
 - Supports one-shot tasks, piped prompts, and persistent interactive sessions.
-- Uses OpenAI's Responses API with its native local `shell` tool.
-- Gives Anthropic and OpenRouter portable `read` and `bash` tools, including image attachments.
+- Gives every provider consistent `read` and `shell` tools, including image attachments.
+- Uses OpenAI's native local tool for `shell` and a compatible function tool for `read`.
 - Supports configurable reasoning effort, model-call and output limits, command timeouts, and machine-readable JSON output.
 - Automatically compacts long conversations using exact provider-reported token usage while preserving the latest complete turn.
 - Can retry recognized safety refusals once with a configured fallback model and keep that model selected for the session.
@@ -145,12 +145,10 @@ The default base URLs are the providers' public APIs. `ANTHROPIC_VERSION` defaul
 
 ## Provider tools and file support
 
-OpenAI receives one native local `shell` tool. Shell calls execute through `bash -lc` in the configured working directory. To inspect an image, the model can issue the virtual command `mini-agent-read PATH`; mini-agent intercepts it and attaches the file as `input_image` on the next Responses API call.
-
-Anthropic and OpenRouter receive two compatible tools:
+Every provider receives tools named `read` and `shell`. OpenAI's `shell` is its native local tool; its `read` tool and both Anthropic/OpenRouter tools use mini-agent's compatible function implementation:
 
 - `read` lists a directory, returns numbered slices of text files (up to 2,000 lines per call), extracts printable strings from otherwise unknown files when `strings` is available, and attaches PNG, JPEG, GIF, or WebP images.
-- `bash` executes a command through `bash -lc` in the configured working directory and reports its combined output and exit status.
+- `shell` executes a command through `bash -lc` in the configured working directory. The compatible implementation reports combined output and exit status; OpenAI's native implementation reports stdout, stderr, and its outcome separately.
 
 PDF input is not supported. Tool output larger than `MINI_AGENT_MAX_TOOL_OUTPUT` is truncated by retaining its beginning and end. Each tool call starts in the configured working directory, so a `cd` in one call does not carry over to later calls.
 
@@ -176,7 +174,7 @@ Recognized signals are Anthropic `stop_reason: "refusal"`, OpenAI refusal output
 
 ## Security and execution notes
 
-The native OpenAI shell and provider-compatible `bash` tool can run arbitrary commands with the same permissions and environment as mini-agent. Use a working directory and environment you are comfortable exposing to the selected model, and avoid placing unrelated secrets in that environment.
+The native OpenAI shell and provider-compatible `shell` tool can run arbitrary commands with the same permissions and environment as mini-agent. Use a working directory and environment you are comfortable exposing to the selected model, and avoid placing unrelated secrets in that environment.
 
 API requests are non-streaming to keep the script compact and provider-neutral. When GNU `timeout` or `gtimeout` is unavailable, command execution still works but the harness cannot enforce `MINI_AGENT_TOOL_TIMEOUT`.
 

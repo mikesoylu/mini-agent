@@ -220,9 +220,9 @@ system_prompt() {
   machine=$(uname -m 2>/dev/null || printf unknown)
   now=$(date '+%Y-%m-%d')
   if [[ "$PROVIDER" == "openai" ]]; then
-    tool_guidance="Use the native shell tool for inspection, searches, file edits, builds, and tests. To visually inspect an image, issue exactly one command of the form: mini-agent-read PATH. The harness intercepts that virtual command and attaches the image to your next turn."
+    tool_guidance="Use the read tool to inspect files, directories, and images. Use the native shell tool for searches, file edits, builds, and tests."
   else
-    tool_guidance="Use the read tool to inspect files, directories, and images. Use the bash tool for searches, file edits, builds, and tests."
+    tool_guidance="Use the read tool to inspect files, directories, and images. Use the shell tool for searches, file edits, builds, and tests."
   fi
   if [[ "$os_name" == "Darwin" ]]; then
     sed_note="<important>
@@ -282,11 +282,11 @@ PROMPT_EOF
 tools_compatible() {
   "$JQ_BIN" -cn '[
     {type:"function",function:{name:"read",description:"Read a text file, attach an image, or list a directory.",parameters:{type:"object",properties:{path:{type:"string",description:"Absolute path or path relative to the working directory"},offset:{type:"integer",minimum:1,description:"First line to read (default 1)"},limit:{type:"integer",minimum:1,maximum:2000,description:"Maximum lines or directory entries (default 250)"}},required:["path"],additionalProperties:false}}},
-    {type:"function",function:{name:"bash",description:"Run a Bash command in the working directory. Use for searching, editing files, building, and testing.",parameters:{type:"object",properties:{command:{type:"string",description:"Bash command to execute"}},required:["command"],additionalProperties:false}}}
+    {type:"function",function:{name:"shell",description:"Run a shell command in the working directory. Use for searching, editing files, building, and testing.",parameters:{type:"object",properties:{command:{type:"string",description:"Shell command to execute through Bash"}},required:["command"],additionalProperties:false}}}
   ]'
 }
 tools_openai() {
-  "$JQ_BIN" -cn '[{type:"shell",environment:{type:"local"}}]'
+  tools_compatible | "$JQ_BIN" -c '[{type:"shell",environment:{type:"local"}}, (.[0].function + {type:"function"})]'
 }
 tools_anthropic() {
   tools_compatible | "$JQ_BIN" -c '[.[] | {name:.function.name,description:.function.description,input_schema:.function.parameters}]'
@@ -664,35 +664,20 @@ truncate_file() {
   tail -c "$half" "$path"
 }
 
-run_bash() {
+run_shell() {
   local command_text=$1 tmp status output timer=()
   tmp=$(mktemp "${TMPDIR:-/tmp}/mini-agent-tool.XXXXXX") || return 1
   if command -v timeout >/dev/null 2>&1; then timer=(timeout "$TOOL_TIMEOUT")
   elif command -v gtimeout >/dev/null 2>&1; then timer=(gtimeout "$TOOL_TIMEOUT"); fi
   (cd "$WORKDIR" && "${timer[@]}" bash -lc "$command_text") > "$tmp" 2>&1
   status=$?
-  debug_log "tool_bash command=$(printf '%q' "$command_text") status=$status"
-  debug_dump_file tool-bash-output.txt "$tmp"
+  debug_log "tool_shell_compatible command=$(printf '%q' "$command_text") status=$status"
+  debug_dump_file tool-shell-compatible-output.txt "$tmp"
   output=$(truncate_file "$tmp")
   rm -f "$tmp"
   [[ -n "$output" ]] || output="(no output)"
   "$JQ_BIN" -cn --arg text "$output\n\n[exit status: $status]" --argjson status "$status" \
     '{kind:"text",text:$text,exit_status:$status}'
-}
-
-native_attachment() {
-  local requested=$1 path mime
-  if [[ "$requested" = /* ]]; then path=$requested; else path="$WORKDIR/$requested"; fi
-  if [[ ! -f "$path" ]]; then "$JQ_BIN" -cn --arg e "Not found: $requested" '{error:$e}'; return; fi
-  case "$path" in *.pdf|*.PDF) "$JQ_BIN" -cn '{error:"PDF files are not supported by mini-agent-read."}'; return ;; esac
-  mime=$(mime_type "$path")
-  case "$mime" in
-    image/png|image/jpeg|image/gif|image/webp)
-      "$JQ_BIN" -Rsc --arg mime "$mime" '{type:"input_image",image_url:("data:"+$mime+";base64,"+.)}' < <(b64_file "$path")
-      ;;
-    application/pdf) "$JQ_BIN" -cn '{error:"PDF files are not supported by mini-agent-read."}' ;;
-    *) "$JQ_BIN" -cn --arg e "mini-agent-read supports images only; use shell utilities for $mime" '{error:$e}' ;;
-  esac
 }
 
 run_native_command() {
@@ -724,8 +709,8 @@ run_native_command() {
   fi
 }
 
-process_openai_shell_calls() {
-  local next='[]' attachments='[]' call type call_id name args requested_limit timeout_ms timeout_seconds outputs command_text result result_text attachment error tool_output message
+process_openai_tool_calls() {
+  local next='[]' attachments='[]' call type call_id name args requested_limit timeout_ms timeout_seconds outputs command_text result result_text attachment tool_output message
   while IFS= read -r call; do
     [[ -n "$call" ]] || continue
     type=$(printf '%s' "$call" | "$JQ_BIN" -r '.type')
@@ -739,6 +724,12 @@ process_openai_shell_calls() {
         '{type:"function_call_output",call_id:$id,output:$output}')
       next=$("$JQ_BIN" -cs '.[0] + [.[1]]' <(printf '%s\n' "$next") <(printf '%s\n' "$tool_output"))
       record_openai_tool_result "$name" "$result_text"
+      if [[ $(printf '%s' "$result" | "$JQ_BIN" -r '.kind') == "image" ]]; then
+        attachment=$(printf '%s' "$result" | "$JQ_BIN" -c \
+          '{type:"input_image",image_url:("data:"+.media_type+";base64,"+.data)}')
+        attachments=$("$JQ_BIN" -cs '.[0] + [.[1]]' \
+          <(printf '%s\n' "$attachments") <(printf '%s\n' "$attachment"))
+      fi
       continue
     fi
     requested_limit=$(printf '%s' "$call" | "$JQ_BIN" -r ".action.max_output_length // $MAX_TOOL_OUTPUT")
@@ -747,25 +738,7 @@ process_openai_shell_calls() {
     outputs='[]'
     while IFS= read -r command_text; do
       [[ -n "$command_text" ]] || continue
-      if [[ "$command_text" == "mini-agent-read "* ]]; then
-        local requested=${command_text#mini-agent-read }
-        case "$requested" in
-          \"*\") requested=${requested#\"}; requested=${requested%\"} ;;
-          \'*\') requested=${requested#\'}; requested=${requested%\'} ;;
-        esac
-        info "${C_CYAN}read attachment${C_RESET} $requested"
-        attachment=$(native_attachment "$requested")
-        error=$(printf '%s' "$attachment" | "$JQ_BIN" -r '.error // empty')
-        if [[ -n "$error" ]]; then
-          result=$("$JQ_BIN" -cn --arg error "$error" '{stdout:"",stderr:$error,outcome:{type:"exit",exit_code:1}}')
-        else
-          result=$("$JQ_BIN" -cn --arg text "Attached $requested to the next model turn." '{stdout:$text,stderr:"",outcome:{type:"exit",exit_code:0}}')
-          attachments=$("$JQ_BIN" -cs '.[0] + [.[1]]' \
-            <(printf '%s\n' "$attachments") <(printf '%s\n' "$attachment"))
-        fi
-      else
-        result=$(run_native_command "$command_text" "$requested_limit" "$timeout_seconds")
-      fi
+      result=$(run_native_command "$command_text" "$requested_limit" "$timeout_seconds")
       outputs=$("$JQ_BIN" -cs '.[0] + [.[1]]' \
         <(printf '%s\n' "$outputs") <(printf '%s\n' "$result"))
     done < <(printf '%s' "$call" | "$JQ_BIN" -r '.action.commands[]')
@@ -778,7 +751,7 @@ process_openai_shell_calls() {
   done < <(printf '%s' "$API_RESPONSE" | "$JQ_BIN" -c '.output[] | select(.type == "shell_call" or .type == "function_call")')
   if [[ $(printf '%s' "$attachments" | "$JQ_BIN" 'length') -gt 0 ]]; then
     message=$("$JQ_BIN" -cn --slurpfile files <(printf '%s\n' "$attachments") \
-      '{role:"user",content:([{type:"input_text",text:"Files requested through mini-agent-read are attached."}] + $files[0])}')
+      '{role:"user",content:([{type:"input_text",text:"Images returned by the read tool are attached."}] + $files[0])}')
     next=$("$JQ_BIN" -cs '.[0] + [.[1]]' \
       <(printf '%s\n' "$next") <(printf '%s\n' "$message"))
   fi
@@ -799,12 +772,12 @@ run_tool() {
       debug_log "tool_read path=$(printf '%q' "$path") offset=$offset limit=$limit"
       read_file "$path" "$offset" "$limit"
       ;;
-    bash)
+    shell)
       command_text=$(printf '%s' "$input" | "$JQ_BIN" -r '.command // empty')
-      [[ -n "$command_text" ]] || { "$JQ_BIN" -cn '{kind:"error",text:"bash requires command"}'; return; }
-      info "${C_CYAN}bash${C_RESET} $command_text"
-      debug_log "tool_bash_requested command=$(printf '%q' "$command_text")"
-      run_bash "$command_text"
+      [[ -n "$command_text" ]] || { "$JQ_BIN" -cn '{kind:"error",text:"shell requires command"}'; return; }
+      info "${C_CYAN}shell${C_RESET} $command_text"
+      debug_log "tool_shell_compatible_requested command=$(printf '%q' "$command_text")"
+      run_shell "$command_text"
       ;;
     *) "$JQ_BIN" -cn --arg t "Unknown tool: $name" '{kind:"error",text:$t}' ;;
   esac
@@ -883,7 +856,7 @@ agent_turn_openai() {
       '[.output[]? | select(.type == "message") | .content[]? | select(.type == "output_text") | .text] | join("\n")')
     record_openai_response
     if [[ "$call_count" -gt 0 ]]; then
-      process_openai_shell_calls
+      process_openai_tool_calls
       input=$OPENAI_NEXT_INPUT
       auto_compact "$input" 1
     else

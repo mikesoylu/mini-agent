@@ -93,9 +93,12 @@ if [[ "$url" == */responses ]]; then
         {type:"shell_call",call_id:"call_2",action:{commands:["wc -c sample.txt"],timeout_ms:120000,max_output_length:4096},status:"in_progress"}
       ]}' > "$out"
     else
-      if [[ -n "${MOCK_READ_PATH:-}" ]]; then command="mini-agent-read ${MOCK_READ_PATH}"
-      else command="sed -n '1,5p' sample.txt"; fi
-      jq -cn --arg command "$command" '{id:"resp_1",status:"completed",usage:{total_tokens:50},output:[{type:"shell_call",call_id:"call_1",action:{commands:[$command],timeout_ms:120000,max_output_length:4096},status:"in_progress"}]}' > "$out"
+      if [[ -n "${MOCK_READ_PATH:-}" ]]; then
+        jq -cn --arg path "$MOCK_READ_PATH" '{id:"resp_1",status:"completed",usage:{total_tokens:50},output:[{type:"function_call",call_id:"call_1",name:"read",arguments:({path:$path}|tojson),status:"completed"}]}' > "$out"
+      else
+        command="sed -n '1,5p' sample.txt"
+        jq -cn --arg command "$command" '{id:"resp_1",status:"completed",usage:{total_tokens:50},output:[{type:"shell_call",call_id:"call_1",action:{commands:[$command],timeout_ms:120000,max_output_length:4096},status:"in_progress"}]}' > "$out"
+      fi
     fi
   fi
 elif [[ "$url" == */messages ]]; then
@@ -128,7 +131,8 @@ assert_contains "$out" "openai done" "OpenAI Responses shell loop"
 assert_equal "$(jq -r '.reasoning.effort' "$TMP/openai.json")" "xhigh" "OpenAI Responses reasoning selection"
 assert_equal "$(jq -r '.max_output_tokens' "$TMP/openai.json")" "32768" "Default maximum output tokens"
 assert_equal "$(jq -r '.tools[0] | .type + ":" + .environment.type' "$TMP/openai.json")" "shell:local" "OpenAI uses native local shell"
-assert_equal "$(jq '.tools | length' "$TMP/openai.json")" "1" "OpenAI exposes no separate edit tool"
+assert_equal "$(jq -r '.tools[1] | .type + ":" + .name' "$TMP/openai.json")" "function:read" "OpenAI uses a compatible read function"
+assert_equal "$(jq '.tools | length' "$TMP/openai.json")" "2" "OpenAI exposes read and shell only"
 assert_contains "$(jq -r '.instructions' "$TMP/openai.json")" "<system_information>" "System prompt includes machine information"
 assert_contains "$(jq -r '.instructions' "$TMP/openai.json")" "cat <<'EOF' > newfile.py" "System prompt includes file creation example"
 assert_contains "$(jq -r '.instructions' "$TMP/openai.json")" "nl -ba filename.py | sed -n '10,20p'" "System prompt includes file viewing example"
@@ -144,12 +148,13 @@ out=$(ANTHROPIC_API_KEY=test MOCK_CAPTURE="$TMP/anthropic.json" CURL_BIN="$TMP/c
 assert_contains "$out" "anthropic done" "Anthropic tool loop"
 assert_equal "$(jq -r '.model' "$TMP/anthropic.json")" "claude-opus-5" "Anthropic default model"
 assert_equal "$(jq -r '.thinking.type + ":" + .output_config.effort' "$TMP/anthropic.json")" "adaptive:medium" "Anthropic reasoning selection"
-assert_equal "$(jq -r '[.tools[].name] | join(",")' "$TMP/anthropic.json")" "read,bash" "Anthropic exposes read and bash only"
+assert_equal "$(jq -r '[.tools[].name] | join(",")' "$TMP/anthropic.json")" "read,shell" "Anthropic exposes read and shell only"
 
 out=$(OPENROUTER_API_KEY=test MOCK_CAPTURE="$TMP/openrouter.json" CURL_BIN="$TMP/curl" "$ROOT/mini-agent.sh" -q -p openrouter --json -C "$TMP" "inspect")
 answer=$(printf '%s' "$out" | jq -r '.answer')
 assert_contains "$answer" "openai done" "OpenRouter JSON mode"
 assert_equal "$(jq -r '.model' "$TMP/openrouter.json")" "openai/gpt-5.6-sol" "OpenRouter default model"
+assert_equal "$(jq -r '[.tools[].function.name] | join(",")' "$TMP/openrouter.json")" "read,shell" "OpenRouter exposes read and shell only"
 
 : > "$TMP/openai-fallback.trace"
 out=$(OPENAI_API_KEY=test MOCK_REFUSE_MODEL=gpt-5.6-sol MOCK_TRACE="$TMP/openai-fallback.trace" CURL_BIN="$TMP/curl" "$ROOT/mini-agent.sh" -q -C "$TMP" "inspect")
@@ -184,7 +189,7 @@ assert_equal "$(cut -f1 "$TMP/openrouter-fallback.trace" | paste -sd, -)" "opena
 
 out=$(OPENAI_API_KEY=test MOCK_READ_PATH=large.png MOCK_CAPTURE="$TMP/image.json" CURL_BIN="$TMP/curl" "$ROOT/mini-agent.sh" -q -C "$TMP" "inspect image")
 assert_contains "$out" "openai done" "Large image attachment avoids argument limits"
-assert_equal "$(jq -r '.input[] | select(.role == "user") | .content[] | select(.type == "input_image") | .type' "$TMP/image.json")" "input_image" "Native shell can request image input"
+assert_equal "$(jq -r '.input[] | select(.role == "user") | .content[] | select(.type == "input_image") | .type' "$TMP/image.json")" "input_image" "OpenAI read can attach image input"
 
 out=$(printf '/quit\n' | OPENAI_API_KEY=test CURL_BIN="$TMP/curl" "$ROOT/mini-agent.sh" -q -i -C "$TMP" "interactive start")
 assert_contains "$out" "mini-agent openai" "Interactive mode"
@@ -282,12 +287,10 @@ HISTORY=$(jq -cn --arg checkpoint "Another language model worked on this task an
 serialized=$(printf '%s' "$HISTORY" | serialization_prompt)
 assert_contains "$serialized" "$long_checkpoint" "OpenAI restart preserves the complete checkpoint"
 assert_contains "$serialized" "characters omitted" "OpenAI restart still clips raw history and tool output"
-tool_result=$(run_bash 'printf "bash tool works"')
-assert_contains "$(printf '%s' "$tool_result" | jq -r '.text')" "bash tool works" "Bash tool execution"
+tool_result=$(run_tool shell '{"command":"printf \"shell tool works\""}')
+assert_contains "$(printf '%s' "$tool_result" | jq -r '.text')" "shell tool works" "Compatible shell tool execution"
 read_result=$(read_file unsupported.pdf)
 assert_equal "$(printf '%s' "$read_result" | jq -r '.kind + ":" + .text')" "error:PDF files are not supported by the read tool." "Read tool rejects PDFs"
-attachment_result=$(native_attachment unsupported.pdf)
-assert_contains "$(printf '%s' "$attachment_result" | jq -r '.error')" "not supported" "Native image reader rejects PDFs"
 
 PROVIDER=anthropic
 API_RESPONSE='{"usage":{"input_tokens":100,"output_tokens":20,"cache_read_input_tokens":30,"cache_creation_input_tokens":40}}'
