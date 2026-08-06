@@ -16,20 +16,31 @@ A deliberately small coding-agent harness inspired by mini-swe-agent. It is impl
 ## Requirements
 
 - Bash 3.2+
-- `curl`, `jq`, `awk`, and `base64`
+- `curl` and `jq`
+- Standard Unix utilities used by the harness: `awk`, `base64`, `cat`, `date`, `find`, `head`, `mktemp`, `rm`, `sort`, `tail`, `tr`, `uname`, and `wc`
+- Standard agent editing and inspection utilities: `sed` and `nl`
+- The install one-liner additionally uses `mkdir` and `chmod`
 - Optional: `file` for MIME detection, `strings` for extracting text from unknown binary files, and GNU `timeout` (or `gtimeout`) to enforce command timeouts
+
+## Install
+
+Download the latest version from this repository into `~/.local/bin`:
+
+```bash
+mkdir -p "$HOME/.local/bin" && curl -fsSL https://raw.githubusercontent.com/mikesoylu/mini-agent/main/mini-agent.sh -o "$HOME/.local/bin/mini-agent" && chmod +x "$HOME/.local/bin/mini-agent"
+```
+
+This installs the script only; the requirements above must already be available. Make sure `~/.local/bin` is on your `PATH`, then run `mini-agent`. To use a local clone without installing it, run `chmod +x mini-agent.sh` followed by `./mini-agent.sh`.
 
 ## Quick start
 
 ```bash
-chmod +x mini-agent.sh
-
 # Configure one provider.
 export OPENAI_API_KEY=...
 # export ANTHROPIC_API_KEY=...
 # export OPENROUTER_API_KEY=...
 
-./mini-agent.sh "Find and fix the failing tests"
+mini-agent "Find and fix the failing tests"
 ```
 
 When several API keys are present, automatic provider selection prefers OpenAI, then Anthropic, then OpenRouter. Pass `--provider` to choose explicitly.
