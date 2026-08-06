@@ -31,6 +31,7 @@ INTERACTIVE_INPUT_CLOSED=0
 INTERACTIVE_INPUT_BUFFER=""
 INTERACTIVE_INPUT_PROMPT_VISIBLE=0
 INTERACTIVE_STTY_STATE=""
+INTERACTIVE_INPUT_FD_OPEN=0
 INTERACTIVE_QUEUED_MESSAGES='[]'
 INTERACTIVE_QUEUED_BATCH='[]'
 INTERACTIVE_QUEUED_COUNT=0
@@ -155,7 +156,7 @@ wait_for_process() {
   show_interactive_input_prompt
   while kill -0 "$pid" 2>/dev/null; do
     if [[ "$INTERACTIVE_INPUT_CLOSED" -eq 1 ]]; then hide_interactive_input_prompt; wait "$pid"; return; fi
-    if IFS= read -r -n 1 -t 1 char; then
+    if IFS= read -r -n 1 -t 1 char <&9; then
       case "$char" in
         $'\004')
           if [[ -n "$INTERACTIVE_INPUT_BUFFER" ]]; then
@@ -196,7 +197,9 @@ wait_for_process() {
 restore_interactive_terminal() {
   hide_interactive_input_prompt
   if [[ -n "$INTERACTIVE_STTY_STATE" ]]; then stty "$INTERACTIVE_STTY_STATE" 2>/dev/null || true; fi
+  if [[ "$INTERACTIVE_INPUT_FD_OPEN" -eq 1 ]]; then exec 9<&-; fi
   INTERACTIVE_STTY_STATE=""
+  INTERACTIVE_INPUT_FD_OPEN=0
   INTERACTIVE_CAPTURE_ENABLED=0
 }
 take_interactive_messages() {
@@ -904,7 +907,7 @@ run_native_command() {
 }
 
 process_openai_tool_calls() {
-  local next='[]' attachments='[]' call type call_id name args requested_limit timeout_ms timeout_seconds outputs command_text result result_text attachment tool_output message
+  local next='[]' attachments='[]' call type call_id name args requested_limit timeout_ms timeout_seconds outputs command_json command_text result result_text attachment tool_output message
   while IFS= read -r call; do
     [[ -n "$call" ]] || continue
     type=$(printf '%s' "$call" | "$JQ_BIN" -r '.type')
@@ -930,12 +933,13 @@ process_openai_tool_calls() {
     timeout_ms=$(printf '%s' "$call" | "$JQ_BIN" -r ".action.timeout_ms // ($TOOL_TIMEOUT * 1000)")
     timeout_seconds=$(( (timeout_ms + 999) / 1000 ))
     outputs='[]'
-    while IFS= read -r command_text; do
+    while IFS= read -r command_json; do
+      command_text=$(printf '%s' "$command_json" | "$JQ_BIN" -r '.')
       [[ -n "$command_text" ]] || continue
       result=$(run_native_command "$command_text" "$requested_limit" "$timeout_seconds")
       outputs=$("$JQ_BIN" -cs '.[0] + [.[1]]' \
         <(printf '%s\n' "$outputs") <(printf '%s\n' "$result"))
-    done < <(printf '%s' "$call" | "$JQ_BIN" -r '.action.commands[]')
+    done < <(printf '%s' "$call" | "$JQ_BIN" -c '.action.commands[]')
     tool_output=$("$JQ_BIN" -cn --arg id "$call_id" --argjson max "$requested_limit" \
       --slurpfile outputs <(printf '%s\n' "$outputs") \
       '{type:"shell_call_output",call_id:$id,max_output_length:$max,output:$outputs[0]}')
@@ -1257,7 +1261,8 @@ run_interactive_agent_turn() {
   INTERACTIVE_QUEUED_COUNT=0
   if [[ -t 0 ]]; then
     INTERACTIVE_STTY_STATE=$(stty -g 2>/dev/null || true)
-    if [[ -n "$INTERACTIVE_STTY_STATE" ]] && stty -echo eof undef 2>/dev/null; then
+    if [[ -n "$INTERACTIVE_STTY_STATE" ]] && stty -echo eof undef 2>/dev/null && exec 9<&0; then
+      INTERACTIVE_INPUT_FD_OPEN=1
       INTERACTIVE_CAPTURE_ENABLED=1
       trap 'restore_interactive_terminal' EXIT
     fi

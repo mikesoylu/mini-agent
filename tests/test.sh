@@ -102,7 +102,11 @@ if [[ "$url" == */responses ]]; then
       if [[ -n "${MOCK_READ_PATH:-}" ]]; then
         jq -cn --arg path "$MOCK_READ_PATH" '{id:"resp_1",status:"completed",usage:{total_tokens:50},output:[{type:"function_call",call_id:"call_1",name:"read",arguments:({path:$path}|tojson),status:"completed"}]}' > "$out"
       else
-        command="sed -n '1,5p' sample.txt"
+        if [[ -n "${MOCK_MULTILINE_COMMAND:-}" ]]; then
+          command=$(printf "sleep 1\nprintf 'multiline tool works\\n'")
+        else
+          command="sed -n '1,5p' sample.txt"
+        fi
         jq -cn --arg command "$command" '{id:"resp_1",status:"completed",usage:{total_tokens:50},output:[{type:"shell_call",call_id:"call_1",action:{commands:[$command],timeout_ms:120000,max_output_length:4096},status:"in_progress"}]}' > "$out"
       fi
     fi
@@ -255,6 +259,22 @@ send -- "/quit\r"
 expect eof
 EXPECT_QUEUE
   assert_equal "$(jq -r '[.input[] | if .type == "shell_call_output" then "tool_result" elif .role == "user" then .content[0].text else empty end] | join(",")' "$TMP/queued-interactive.json")" "tool_result,queued follow-up" "Interactive input is queued after OpenAI tool results"
+
+  EXPECT_ROOT="$ROOT" EXPECT_TMP="$TMP" expect <<'EXPECT_MULTILINE'
+set timeout 15
+log_user 0
+set root $env(EXPECT_ROOT)
+set tmp $env(EXPECT_TMP)
+spawn env OPENAI_API_KEY=test MOCK_MULTILINE_COMMAND=1 MOCK_CAPTURE=$tmp/multiline-interactive.json CURL_BIN=$tmp/curl $root/miniagent.sh -C $tmp
+expect "> "
+send -- "inspect\r"
+expect "multiline tool works"
+expect "> "
+send -- "/quit\r"
+expect eof
+EXPECT_MULTILINE
+  assert_equal "$(jq '[.input[] | select(.role == "user")] | length' "$TMP/multiline-interactive.json")" "0" "Multiline shell input is not queued as user messages"
+  assert_contains "$(jq -r '.input[] | select(.type == "shell_call_output") | .output[0].stdout' "$TMP/multiline-interactive.json")" "multiline tool works" "Multiline shell command executes as one command"
 
   EXPECT_ROOT="$ROOT" EXPECT_TMP="$TMP" expect <<'EXPECT_EOF'
 set timeout 15
