@@ -50,26 +50,26 @@ If you have not configured a provider key, miniagent uses the public fallback. S
 ## Usage
 
 ```text
-miniagent.sh [options] "task"
-miniagent.sh [options]                 # interactive mode in a terminal
+miniagent [options] "task"
+miniagent [options]                    # interactive mode in a terminal
 ```
 
 Examples:
 
 ```bash
 # One-shot tasks
-./miniagent.sh -m gpt-5.6-sol -r xhigh "Find and fix the failing tests"
-./miniagent.sh -p anthropic -m claude-opus-5 "Explain this repository"
-./miniagent.sh -p openrouter -C ./project "Review the current diff"
+miniagent -m gpt-5.6-sol -r xhigh "Find and fix the failing tests"
+miniagent -p anthropic -m claude-opus-5 "Explain this repository"
+miniagent -p openrouter -C ./project "Review the current diff"
 
 # Read a task from stdin
-printf 'List the main components' | ./miniagent.sh -p openai
+printf 'List the main components' | miniagent -p openai
 
 # Emit one JSON object on stdout
-./miniagent.sh --json "Summarize the repository"
+miniagent --json "Summarize the repository"
 
 # Complete the initial task, then stay in an interactive session
-./miniagent.sh -i "Start by reading README.md"
+miniagent -i "Start by reading README.md"
 ```
 
 ### CLI options
@@ -96,7 +96,7 @@ Reasoning levels are `default`, `none`, `minimal`, `low`, `medium`, `high`, `xhi
 
 ## Interactive sessions
 
-Run `./miniagent.sh` with no task in a terminal, or add `-i` after an initial task. Conversation history and the active fallback model are retained between requests.
+Run `miniagent` with no task in a terminal, or add `-i` after an initial task. Conversation history and the active fallback model are retained between requests.
 
 | Command | Action |
 |---|---|
