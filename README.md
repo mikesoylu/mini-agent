@@ -1,6 +1,6 @@
 # mini-agent.sh
 
-A deliberately small coding-agent harness inspired by mini-swe-agent, implemented in one Bash script. OpenAI uses the Responses API's native local `shell` tool; all providers also get Codex-style `apply_patch`, while Anthropic and OpenRouter retain provider-compatible `read` and `bash` tools.
+A deliberately small coding-agent harness inspired by mini-swe-agent, implemented in one Bash script. OpenAI uses the Responses API's native local `shell` tool, while Anthropic and OpenRouter use provider-compatible `read` and `bash` tools.
 
 ## Requirements
 
@@ -39,7 +39,7 @@ Run with no task, or add `-i` to continue chatting after a CLI task:
 ./mini-agent.sh -i "Start by reading README.md"
 ```
 
-Inside the prompt, use `/model`, `/provider`, `/reasoning`, `/clear`, `/help`, and `/quit`.
+Inside the prompt, use `/model`, `/provider`, `/reasoning`, `/compact`, `/status`, `/clear`, `/help`, and `/quit`. `/compact` creates a checkpoint immediately; `/status` reports the latest exact provider token count, compaction threshold and remaining budget, message count, and model limits.
 
 ## Configuration
 
@@ -53,21 +53,23 @@ Provider-specific variables:
 
 Shared variables include `MINI_AGENT_PROVIDER`, `MINI_AGENT_MODEL`, `MINI_AGENT_FALLBACK_MODEL`, `MINI_AGENT_REASONING`, `MINI_AGENT_MAX_TURNS`, `MINI_AGENT_MAX_TOKENS`, `MINI_AGENT_COMPACT_TOKENS`, `MINI_AGENT_COMPACT_MAX_TOKENS`, `MINI_AGENT_TOOL_TIMEOUT`, `MINI_AGENT_API_TIMEOUT`, `MINI_AGENT_MAX_TOOL_OUTPUT`, and `MINI_AGENT_WORKDIR`. `--compact-tokens` or `MINI_AGENT_COMPACT_TOKENS` sets the automatic compaction threshold, which defaults to 262144 tokens (256k). Summary output is capped at 13107 tokens by default.
 
-Default primary/fallback pairs are OpenAI `gpt-5.6-sol` → `gpt-5.6-terra`, Anthropic `claude-opus-5` → `claude-sonnet-5`, and OpenRouter `openai/gpt-5.6-sol` → `openai/gpt-5.6-terra`. Override the fallback with `--fallback-model`, the shared environment variable, or its provider-specific counterpart; use `--fallback-model none` to disable it. A recognized safety refusal is retried once, then the fallback remains pinned for the rest of that user turn. Anthropic is triggered specifically by `stop_reason: "refusal"`; OpenAI refusal content and OpenRouter `content_filter`/`message.refusal` responses are also recognized. Network, rate-limit, overload, and ordinary API errors are not retried on another model.
+Default primary/fallback pairs are OpenAI `gpt-5.6-sol` → `gpt-5.6-terra`, Anthropic `claude-opus-5` → `claude-sonnet-5`, and OpenRouter `openai/gpt-5.6-sol` → `openai/gpt-5.6-terra`. Override the fallback with `--fallback-model`, the shared environment variable, or its provider-specific counterpart; use `--fallback-model none` to disable it. A recognized safety refusal is retried once, then the fallback remains pinned for the rest of that user turn. Anthropic is triggered specifically by `stop_reason: "refusal"`; OpenAI refusal content and HTTP 400 content-policy/cybersecurity rejections, plus OpenRouter `content_filter`/`message.refusal` responses, are also recognized. Network, rate-limit, overload, and ordinary API errors are not retried on another model.
 
 Reasoning levels are `default`, `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. Providers and models support different subsets. `default` omits reasoning controls and uses the model's native behavior. OpenAI uses `reasoning.effort` on Responses (`minimal` maps to `low`); Anthropic uses adaptive thinking (`minimal` maps to `low`); OpenRouter maps `max` to `xhigh` for compatibility.
 
 ## Context compaction
 
-After every model response, mini-agent uses the provider-reported context usage rather than estimating it. Anthropic cache-read and cache-creation tokens are included. At the configured threshold, the current model summarizes older messages without tools, injects the checkpoint as a user message, and retains the latest complete turn. If one turn remains oversized, later compactions split its older prefix from its recent assistant/tool suffix. OpenAI clears its `previous_response_id` chain and resumes from the compacted transcript.
+After every model response, mini-agent uses the provider-reported context usage rather than estimating it. Anthropic cache-read and cache-creation tokens are included. Automatic compaction waits for the agent turn to finish with every tool call resolved, so the conversation may exceed the threshold slightly.
 
-## Editing
+The summary request preserves the existing provider-native conversation, system prompt, tools, and settings, then appends one user compaction message. This keeps the prior request prefix eligible for provider token caching. OpenAI appends the message to its existing `previous_response_id` chain; Anthropic and OpenRouter append it to their unchanged message arrays. Image blocks remain in history until compaction, and the checkpoint prompt requires exact attachment paths plus short visual-content summaries.
 
-The `apply_patch` tool follows Codex CLI's patch envelope: `*** Begin Patch`, one or more `*** Add File`, `*** Delete File`, or `*** Update File` sections, optional `*** Move to`, and `*** End Patch`. Update hunks match exactly first, then retry while ignoring trailing whitespace and finally surrounding whitespace. Paths are relative to `--chdir`; absolute paths, parent traversal, and symlink traversal are rejected.
+After generating the summary, mini-agent injects it as a user message and retains the latest complete turn. If one turn remains oversized, later compactions split its older prefix from its recent assistant/tool suffix. OpenAI then clears its response chain and resumes from the compacted transcript. Token usage is marked unknown until the next normal model response supplies an exact count.
 
 ## File support and safety
 
-On OpenAI, the model reads text through the native local shell and edits through the `apply_patch` function tool. For visual input it can issue `mini-agent-read PATH`; the harness intercepts that virtual command and supplies the image as `input_image` on the next Responses turn. No legacy `local_shell` calls are used.
+The system prompt includes the operating system, machine architecture, current date, working directory, and examples for creating, editing, and viewing files with shell commands. On macOS it explicitly uses the BSD `sed -i ''` form.
+
+On OpenAI, the model reads and edits through the native local shell. For visual input it can issue `mini-agent-read PATH`; the harness intercepts that virtual command and supplies the image as `input_image` on the next Responses turn. No legacy `local_shell` calls are used.
 
 Anthropic and OpenRouter retain the portable `read` adapter: it returns numbered text, directory listings, and actual image data for PNG/JPEG/GIF/WebP. PDF files are not supported by either read path.
 

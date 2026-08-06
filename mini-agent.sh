@@ -23,6 +23,7 @@ HISTORY='[]'
 OPENAI_PREVIOUS_RESPONSE_ID=""
 OPENAI_NEEDS_RESTART=0
 CONTEXT_TOKENS=0
+CONTEXT_TOKENS_KNOWN=0
 COMPACTION_SUMMARY=""
 LAST_ANSWER=""
 CURL_BIN="${CURL_BIN:-curl}"
@@ -68,7 +69,7 @@ Environment:
   OPENROUTER_HTTP_REFERER, OPENROUTER_APP_NAME
 
 Interactive commands:
-  /model NAME, /provider NAME, /reasoning LEVEL, /clear, /help, /quit
+  /model NAME, /provider NAME, /reasoning LEVEL, /compact, /status, /clear, /help, /quit
 EOF
 }
 need_cmd() { command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"; }
@@ -138,34 +139,77 @@ validate_config() {
   WORKDIR=$(cd "$WORKDIR" 2>/dev/null && pwd -P) || die "cannot enter working directory"
 }
 system_prompt() {
+  local os_name machine now tool_guidance sed_note=""
+  os_name=$(uname -s 2>/dev/null || printf unknown)
+  machine=$(uname -m 2>/dev/null || printf unknown)
+  now=$(date '+%Y-%m-%d')
   if [[ "$PROVIDER" == "openai" ]]; then
-    cat <<EOF
-You are a capable software-engineering agent working in: $WORKDIR
+    tool_guidance="Use the native shell tool for inspection, searches, file edits, builds, and tests. To visually inspect an image, issue exactly one command of the form: mini-agent-read PATH. The harness intercepts that virtual command and attaches the image to your next turn."
+  else
+    tool_guidance="Use the read tool to inspect files, directories, and images. Use the bash tool for searches, file edits, builds, and tests."
+  fi
+  if [[ "$os_name" == "Darwin" ]]; then
+    sed_note="<important>
+You are on MacOS. For all the below examples, use \`sed -i ''\` instead of \`sed -i\`.
+</important>"
+  fi
+  cat <<PROMPT_EOF
+You are a concise, capable software-engineering agent.
 
-Use the native shell tool for inspection, searches, builds, and tests. Use the apply_patch tool for file edits. Commands run locally in the working directory through Bash. Prefer common portable Unix utilities. To visually inspect an image, issue exactly one command of the form: mini-agent-read PATH. The harness intercepts that virtual command and attaches the image to your next turn.
+<system_information>
+$os_name $machine $now $WORKDIR
+</system_information>
+
+$tool_guidance Commands run locally in the working directory through Bash. Prefer common portable Unix utilities.
+
+## Useful command examples
+
+### Create a new file:
+
+\`\`\`bash
+cat <<'EOF' > newfile.py
+import numpy as np
+hello = "world"
+print(hello)
+EOF
+\`\`\`
+
+### Edit files with sed:
+
+$sed_note
+
+\`\`\`bash
+# Replace all occurrences
+sed -i 's/old_string/new_string/g' filename.py
+
+# Replace only first occurrence
+sed -i 's/old_string/new_string/' filename.py
+
+# Replace first occurrence on line 1
+sed -i '1s/old_string/new_string/' filename.py
+
+# Replace all occurrences in lines 1-10
+sed -i '1,10s/old_string/new_string/g' filename.py
+\`\`\`
+
+### View file content:
+
+\`\`\`bash
+# View specific lines with numbers
+nl -ba filename.py | sed -n '10,20p'
+\`\`\`
 
 Work autonomously until the task is complete. Inspect before changing, preserve unrelated work, and verify changes. Never claim a command succeeded unless its result says so. Keep final answers brief and include changed files and verification.
-EOF
-    return
-  fi
-  cat <<EOF
-You are a concise, capable software-engineering agent working in: $WORKDIR
-
-Use the read tool to inspect files, directories, and images. Use the bash tool for searches, builds, and tests, and apply_patch for file edits. Prefer common portable Unix utilities. Work autonomously until the task is complete. Inspect before changing, preserve unrelated work, and verify changes. Never claim a command succeeded unless its result says so. Keep final answers brief and include changed files and verification.
-EOF
+PROMPT_EOF
 }
 tools_compatible() {
   "$JQ_BIN" -cn '[
     {type:"function",function:{name:"read",description:"Read a text file, attach an image, or list a directory.",parameters:{type:"object",properties:{path:{type:"string",description:"Absolute path or path relative to the working directory"},offset:{type:"integer",minimum:1,description:"First line to read (default 1)"},limit:{type:"integer",minimum:1,maximum:2000,description:"Maximum lines or directory entries (default 250)"}},required:["path"],additionalProperties:false}}},
-    {type:"function",function:{name:"bash",description:"Run a Bash command in the working directory. Use for searching, building, and testing.",parameters:{type:"object",properties:{command:{type:"string",description:"Bash command to execute"}},required:["command"],additionalProperties:false}}},
-    {type:"function",function:{name:"apply_patch",description:"Edit files with Codex apply_patch syntax. The patch must start with *** Begin Patch and end with *** End Patch, using Add File, Delete File, or Update File sections and optional Move to headers.",parameters:{type:"object",properties:{patch:{type:"string",description:"Complete Codex apply_patch text"}},required:["patch"],additionalProperties:false}}}
+    {type:"function",function:{name:"bash",description:"Run a Bash command in the working directory. Use for searching, editing files, building, and testing.",parameters:{type:"object",properties:{command:{type:"string",description:"Bash command to execute"}},required:["command"],additionalProperties:false}}}
   ]'
 }
 tools_openai() {
-  "$JQ_BIN" -cn '[
-    {type:"shell",environment:{type:"local"}},
-    {type:"function",name:"apply_patch",description:"Edit files with Codex apply_patch syntax. Use an envelope from *** Begin Patch through *** End Patch with Add File, Delete File, or Update File sections and optional Move to headers.",parameters:{type:"object",properties:{patch:{type:"string",description:"Complete Codex apply_patch text"}},required:["patch"],additionalProperties:false},strict:false}
-  ]'
+  "$JQ_BIN" -cn '[{type:"shell",environment:{type:"local"}}]'
 }
 tools_anthropic() {
   tools_compatible | "$JQ_BIN" -c '[.[] | {name:.function.name,description:.function.description,input_schema:.function.parameters}]'
@@ -185,12 +229,13 @@ api_request() {
     printf 'network error (curl exit %s)\n' "$curl_status" >&2
     return 1
   fi
-  if [[ ! "$status" =~ ^2 ]]; then
-    printf 'API error HTTP %s: %s\n' "$status" "$(printf '%s' "$API_RESPONSE" | "$JQ_BIN" -r '.error.message // .error // .' 2>/dev/null)" >&2
-    return 1
-  fi
   if ! printf '%s' "$API_RESPONSE" | "$JQ_BIN" -e . >/dev/null 2>&1; then
     printf 'API returned invalid JSON\n' >&2
+    return 1
+  fi
+  if [[ ! "$status" =~ ^2 ]]; then
+    response_is_refusal && return 2
+    printf 'API error HTTP %s: %s\n' "$status" "$(printf '%s' "$API_RESPONSE" | "$JQ_BIN" -r '.error.message // .error // .' 2>/dev/null)" >&2
     return 1
   fi
 }
@@ -265,21 +310,25 @@ call_anthropic() {
 response_is_refusal() {
   case "$PROVIDER" in
     anthropic) printf '%s' "$API_RESPONSE" | "$JQ_BIN" -e '.stop_reason == "refusal"' ;;
-    openai) printf '%s' "$API_RESPONSE" | "$JQ_BIN" -e 'any(.output[]?.content[]?; .type == "refusal")' ;;
+    openai) printf '%s' "$API_RESPONSE" | "$JQ_BIN" -e '
+      any(.output[]?.content[]?; .type == "refusal") or
+      (((.error.code // "") | test("content_filter|content_policy|safety|cyber"; "i")) or
+       ((.error.message // "") | test("flagged for possible (cybersecurity|safety) risk|blocked by (a |the )?(safety|content) policy"; "i")))' ;;
     openrouter) printf '%s' "$API_RESPONSE" | "$JQ_BIN" -e '.choices[0].finish_reason == "content_filter" or ((.choices[0].message.refusal? // null) as $r | $r != null and $r != "")' ;;
   esac >/dev/null 2>&1
 }
 refusal_reason() {
   case "$PROVIDER" in
     anthropic) printf '%s' "$API_RESPONSE" | "$JQ_BIN" -r '.stop_details.explanation // "safety refusal"' ;;
-    openai) printf '%s' "$API_RESPONSE" | "$JQ_BIN" -r '[.output[]?.content[]? | select(.type == "refusal") | .refusal] | first // "safety refusal"' ;;
+    openai) printf '%s' "$API_RESPONSE" | "$JQ_BIN" -r '.error.message // ([.output[]?.content[]? | select(.type == "refusal") | .refusal] | first) // "safety refusal"' ;;
     openrouter) printf '%s' "$API_RESPONSE" | "$JQ_BIN" -r '.choices[0].message.refusal // .choices[0].finish_reason // "safety refusal" | if type == "string" then . else tojson end' ;;
   esac
 }
 call_with_fallback() {
-  local fn=$1 previous=$OPENAI_PREVIOUS_RESPONSE_ID refused reason
+  local fn=$1 previous=$OPENAI_PREVIOUS_RESPONSE_ID refused reason status=0
   shift
-  "$fn" "$@" || return 1
+  "$fn" "$@" || status=$?
+  if [[ "$status" -ne 0 ]] && ! response_is_refusal; then return "$status"; fi
   response_is_refusal || return 0
   refused=${TURN_MODEL:-$MODEL}; reason=$(refusal_reason)
   if [[ -z "$FALLBACK_MODEL" || "$FALLBACK_MODEL" == "none" || "$FALLBACK_MODEL" == "$refused" ]]; then
@@ -287,7 +336,8 @@ call_with_fallback() {
   fi
   info "${C_CYAN}fallback${C_RESET} $refused refused: $reason; retrying with $FALLBACK_MODEL"
   OPENAI_PREVIOUS_RESPONSE_ID=$previous; TURN_MODEL=$FALLBACK_MODEL
-  "$fn" "$@" || return 1
+  status=0; "$fn" "$@" || status=$?
+  if [[ "$status" -ne 0 ]] && ! response_is_refusal; then return "$status"; fi
   if response_is_refusal; then
     OPENAI_PREVIOUS_RESPONSE_ID=$previous; reason=$(refusal_reason); LAST_ANSWER="Fallback model $TURN_MODEL refused the request: $reason"
     printf '%s\n' "$LAST_ANSWER" >&2; return 1
@@ -318,19 +368,11 @@ serialization_prompt() {
        (if (.tool_calls // [] | length) > 0 then "\n[tool calls] " + (.tool_calls|tojson) else "" end)) | clipped;
     map("[" + ((.role // "message") | ascii_upcase) + "]: " + body) | join("\n\n")'
 }
-compaction_system_prompt() {
-  cat <<'EOF'
-You create context checkpoint summaries for another coding agent. Preserve exact file paths, function names, commands, errors, constraints, decisions, and unfinished work. Do not continue the task or call tools.
-EOF
-}
 compaction_user_prompt() {
-  local conversation=$1
-  cat <<EOF
-<conversation>
-$conversation
-</conversation>
+  cat <<'EOF'
+Create a context checkpoint summarizing the conversation before this message. Do not continue the task or call tools. Preserve exact file paths, function names, commands, errors, constraints, decisions, and unfinished work. For every image attachment in the history, preserve its exact file path and a short summary of its relevant visual content; if either is unknown, say so rather than inventing it.
 
-The messages above are a conversation to summarize. Create a structured context checkpoint using exactly these sections:
+Use exactly these sections:
 
 ## Goal
 ## Constraints & Preferences
@@ -341,45 +383,45 @@ The messages above are a conversation to summarize. Create a structured context 
 ## Key Decisions
 ## Next Steps
 ## Critical Context
+## Image Attachments
 
 Keep it concise and suitable for another model to continue without duplicating work.
 EOF
 }
 call_compaction_summary() {
-  local prompt=$1 body max=$COMPACT_MAX_TOKENS summary refused reason
+  local prompt=$1 pending=${2:-'[]'} max=$COMPACT_MAX_TOKENS summary refused reason input user status=0
+  local saved_history=$HISTORY saved_max=$MAX_TOKENS saved_previous=$OPENAI_PREVIOUS_RESPONSE_ID
   [[ "$max" -gt "$MAX_TOKENS" ]] && max=$MAX_TOKENS
+  MAX_TOKENS=$max
   case "$PROVIDER" in
     openai)
-      body=$("$JQ_BIN" -cn --arg model "${TURN_MODEL:-$MODEL}" --arg instructions "$(compaction_system_prompt)" \
-        --arg prompt "$prompt" --argjson max "$max" \
-        '{model:$model,instructions:$instructions,input:[{role:"user",content:[{type:"input_text",text:$prompt}]}],max_output_tokens:$max}')
-      api_request "$API_URL/responses" "authorization" "Bearer $OPENAI_API_KEY" "$body" || return 1
-      summary=$(printf '%s' "$API_RESPONSE" | "$JQ_BIN" -r \
-        '[.output[]? | select(.type == "message") | .content[]? | select(.type == "output_text") | .text] | join("\n")')
+      input=$("$JQ_BIN" -cn --argjson pending "$pending" --arg prompt "$prompt" \
+        '$pending + [{role:"user",content:[{type:"input_text",text:$prompt}]}]')
+      call_openai_responses "$input" || status=$?
       ;;
     anthropic)
-      body=$("$JQ_BIN" -cn --arg model "${TURN_MODEL:-$MODEL}" --arg system "$(compaction_system_prompt)" \
-        --arg prompt "$prompt" --argjson max "$max" \
-        '{model:$model,system:$system,messages:[{role:"user",content:$prompt}],max_tokens:$max}')
-      api_request "$API_URL/messages" "x-api-key" "$ANTHROPIC_API_KEY" "$body" \
-        -H "anthropic-version: ${ANTHROPIC_VERSION:-2023-06-01}" || return 1
-      summary=$(printf '%s' "$API_RESPONSE" | "$JQ_BIN" -r '[.content[]? | select(.type == "text") | .text] | join("\n")')
+      user=$("$JQ_BIN" -cn --arg prompt "$prompt" '{role:"user",content:$prompt}')
+      HISTORY=$("$JQ_BIN" -cn --argjson history "$saved_history" --argjson user "$user" '$history + [$user]')
+      call_anthropic || status=$?
       ;;
     openrouter)
-      body=$("$JQ_BIN" -cn --arg model "${TURN_MODEL:-$MODEL}" --arg system "$(compaction_system_prompt)" \
-        --arg prompt "$prompt" --argjson max "$max" \
-        '{model:$model,messages:[{role:"system",content:$system},{role:"user",content:$prompt}],max_completion_tokens:$max}')
-      local headers=(-H "X-Title: ${OPENROUTER_APP_NAME:-mini-agent}")
-      [[ -n "${OPENROUTER_HTTP_REFERER:-}" ]] && headers+=( -H "HTTP-Referer: $OPENROUTER_HTTP_REFERER" )
-      api_request "$API_URL/chat/completions" "authorization" "Bearer $OPENROUTER_API_KEY" "$body" "${headers[@]}" || return 1
-      summary=$(printf '%s' "$API_RESPONSE" | "$JQ_BIN" -r '.choices[0].message.content // ""')
+      user=$("$JQ_BIN" -cn --arg prompt "$prompt" '{role:"user",content:$prompt}')
+      HISTORY=$("$JQ_BIN" -cn --argjson history "$saved_history" --argjson user "$user" '$history + [$user]')
+      call_openrouter || status=$?
       ;;
+  esac
+  HISTORY=$saved_history; MAX_TOKENS=$saved_max; OPENAI_PREVIOUS_RESPONSE_ID=$saved_previous
+  if [[ "$status" -ne 0 ]] && ! response_is_refusal; then return "$status"; fi
+  case "$PROVIDER" in
+    openai) summary=$(printf '%s' "$API_RESPONSE" | "$JQ_BIN" -r '[.output[]? | select(.type == "message") | .content[]? | select(.type == "output_text") | .text] | join("\n")') ;;
+    anthropic) summary=$(printf '%s' "$API_RESPONSE" | "$JQ_BIN" -r '[.content[]? | select(.type == "text") | .text] | join("\n")') ;;
+    openrouter) summary=$(printf '%s' "$API_RESPONSE" | "$JQ_BIN" -r '.choices[0].message.content // ""') ;;
   esac
   if response_is_refusal; then
     refused=${TURN_MODEL:-$MODEL}; reason=$(refusal_reason)
     if [[ -n "$FALLBACK_MODEL" && "$FALLBACK_MODEL" != "none" && "$FALLBACK_MODEL" != "$refused" ]]; then
       info "${C_CYAN}fallback${C_RESET} $refused refused compaction: $reason; retrying with $FALLBACK_MODEL"
-      TURN_MODEL=$FALLBACK_MODEL; call_compaction_summary "$prompt"; return
+      TURN_MODEL=$FALLBACK_MODEL; call_compaction_summary "$prompt" "$pending"; return
     fi
     printf 'compaction model %s refused: %s\n' "$refused" "$reason" >&2; return 1
   fi
@@ -387,31 +429,30 @@ call_compaction_summary() {
   COMPACTION_SUMMARY=$summary
 }
 compact_history() {
-  local cut old kept conversation prompt summary prefix
+  local pending=${1:-'[]'} cut kept prompt summary prefix
   cut=$(printf '%s' "$HISTORY" | "$JQ_BIN" -r '
     ([to_entries[] | select(.value.role == "user" and (.value.content|type) == "string") | .key] | last // -1) as $user |
     (.[0].content? | type == "string" and startswith("Another language model worked on this task")) as $already_compacted |
     if $user > 0 and (($already_compacted and $user == 1) | not) then $user
     else ([to_entries[] | select(.value.role == "assistant" and .key > 0) | .key] | last // -1) end')
   [[ "$cut" -gt 0 ]] || { printf 'context is too large but has no safe compaction boundary\n' >&2; return 1; }
-  old=$(printf '%s' "$HISTORY" | "$JQ_BIN" -c --argjson cut "$cut" '.[0:$cut]')
   kept=$(printf '%s' "$HISTORY" | "$JQ_BIN" -c --argjson cut "$cut" '.[$cut:]')
-  conversation=$(printf '%s' "$old" | serialization_prompt)
-  prompt=$(compaction_user_prompt "$conversation")
-  call_compaction_summary "$prompt" || return 1
+  prompt=$(compaction_user_prompt)
+  call_compaction_summary "$prompt" "$pending" || return 1
   summary=$COMPACTION_SUMMARY
   prefix="Another language model worked on this task and produced a context checkpoint. Use it to continue without duplicating effort:\n\n$summary"
   HISTORY=$("$JQ_BIN" -cn --arg prefix "$prefix" --argjson kept "$kept" '[{role:"user",content:$prefix}] + $kept')
-  CONTEXT_TOKENS=0
+  CONTEXT_TOKENS=0; CONTEXT_TOKENS_KNOWN=0
   if [[ "$PROVIDER" == "openai" ]]; then
     OPENAI_PREVIOUS_RESPONSE_ID=""
     OPENAI_NEEDS_RESTART=1
   fi
 }
 maybe_compact() {
+  local pending=${1:-'[]'}
   [[ "$CONTEXT_TOKENS" -ge "$COMPACT_TOKENS" ]] || return 0
   info "${C_CYAN}compact${C_RESET} context $CONTEXT_TOKENS/$COMPACT_TOKENS tokens"
-  compact_history
+  compact_history "$pending"
 }
 openai_history_input() {
   local conversation
@@ -509,186 +550,6 @@ run_bash() {
   [[ -n "$output" ]] || output="(no output)"
   "$JQ_BIN" -cn --arg text "$output\n\n[exit status: $status]" --argjson status "$status" \
     '{kind:"text",text:$text,exit_status:$status}'
-}
-
-safe_patch_path() {
-  local requested=$1 rest part current=$WORKDIR
-  case "$requested" in ""|/*|.|..|./*|../*|*/./*|*/../*|*/.|*/..) return 1 ;; esac
-  rest=$requested
-  while [[ "$rest" == */* ]]; do
-    part=${rest%%/*}; rest=${rest#*/}
-    [[ -n "$part" ]] || return 1
-    current="$current/$part"
-    [[ ! -L "$current" ]] || return 1
-  done
-  [[ -n "$rest" && ! -L "$current/$rest" ]]
-}
-
-apply_update_section() {
-  local source=$1 section=$2 output=$3
-  awk -v patch_file="$section" -v source_name="$source" '
-    function fail(message) { print message > "/dev/stderr"; failed=1; exit 2 }
-    function rstrip(value) { sub(/[ \t\r]+$/, "", value); return value }
-    function trim(value) { sub(/^[ \t\r]+/, "", value); sub(/[ \t\r]+$/, "", value); return value }
-    function equal_line(a, b, mode) {
-      if (mode == 1) return a == b
-      if (mode == 2) return rstrip(a) == rstrip(b)
-      return trim(a) == trim(b)
-    }
-    function seek_line(value, first,    mode,i) {
-      for (mode=1; mode<=3; mode++) for (i=first; i<=line_count; i++) if (equal_line(lines[i], value, mode)) return i
-      return 0
-    }
-    function sequence_matches(pos, chunk, mode,    j) {
-      for (j=1; j<=old_count[chunk]; j++) if (!equal_line(lines[pos+j-1], old[chunk,j], mode)) return 0
-      return 1
-    }
-    function seek_sequence(chunk, first, eof,    mode,i,last,start) {
-      if (old_count[chunk] == 0) return first
-      last=line_count-old_count[chunk]+1
-      if (last < first) return 0
-      start=eof ? last : first
-      for (mode=1; mode<=3; mode++) for (i=start; i<=last; i++) if (sequence_matches(i, chunk, mode)) return i
-      return 0
-    }
-    { lines[++line_count]=$0 }
-    END {
-      if (failed) exit 2
-      while ((getline patch_line < patch_file) > 0) {
-        sub(/\r$/, "", patch_line)
-        if (patch_line == "@@" || substr(patch_line,1,3) == "@@ ") {
-          chunk_count++
-          if (length(patch_line) > 3) context[chunk_count]=substr(patch_line,4)
-        } else if (patch_line == "*** End of File") {
-          if (chunk_count == 0) fail("Invalid patch: End of File outside a hunk")
-          at_eof[chunk_count]=1
-        } else {
-          if (chunk_count == 0) fail("Invalid patch: update lines must follow @@")
-          prefix=substr(patch_line,1,1); value=substr(patch_line,2)
-          if (prefix == " " || prefix == "-") old[chunk_count,++old_count[chunk_count]]=value
-          if (prefix == " " || prefix == "+") new[chunk_count,++new_count[chunk_count]]=value
-          if (prefix != " " && prefix != "-" && prefix != "+") fail("Invalid patch line: " patch_line)
-        }
-      }
-      close(patch_file)
-      if (chunk_count == 0) fail("Invalid patch: update has no hunks")
-      cursor=1
-      for (chunk=1; chunk<=chunk_count; chunk++) {
-        if (context[chunk] != "") {
-          found=seek_line(context[chunk],cursor)
-          if (!found) fail("Failed to find context \"" context[chunk] "\" in " source_name)
-          cursor=found+1
-        }
-        if (old_count[chunk] == 0) found=line_count+1
-        else found=seek_sequence(chunk,cursor,at_eof[chunk])
-        if (!found) {
-          expected=""; for (j=1; j<=old_count[chunk]; j++) expected=expected (j>1 ? "\\n" : "") old[chunk,j]
-          fail("Failed to find expected lines in " source_name ": " expected)
-        }
-        replace_at[chunk]=found
-        cursor=found+old_count[chunk]
-      }
-      for (chunk=chunk_count; chunk>=1; chunk--) {
-        start=replace_at[chunk]; removed=old_count[chunk]; added=new_count[chunk]; delta=added-removed
-        if (delta > 0) for (i=line_count; i>=start+removed; i--) lines[i+delta]=lines[i]
-        else if (delta < 0) for (i=start+removed; i<=line_count; i++) lines[i+delta]=lines[i]
-        for (i=1; i<=added; i++) lines[start+i-1]=new[chunk,i]
-        line_count+=delta
-      }
-      for (i=1; i<=line_count; i++) print lines[i]
-    }
-  ' "$source" > "$output"
-}
-
-apply_patch_section() {
-  local action=$1 path=$2 move=$3 section=$4 target parent tmp
-  safe_patch_path "$path" || { printf 'Invalid patch path: %s\n' "$path" >&2; return 1; }
-  target="$WORKDIR/$path"
-  case "$action" in
-    add)
-      parent=${target%/*}; [[ "$parent" != "$target" ]] || parent=$WORKDIR
-      mkdir -p "$parent" || return 1
-      [[ -s "$section" ]] || { printf 'Invalid Add File section: %s\n' "$path" >&2; return 1; }
-      tmp=$(mktemp "${TMPDIR:-/tmp}/mini-agent-patch.XXXXXX") || return 1
-      awk 'substr($0,1,1)!="+" {print "Invalid Add File line: " $0 > "/dev/stderr"; exit 2} {print substr($0,2)}' \
-        "$section" > "$tmp" || { rm -f "$tmp"; return 1; }
-      cp "$tmp" "$target" || { rm -f "$tmp"; return 1; }
-      rm -f "$tmp"
-      printf 'A %s\n' "$path"
-      ;;
-    delete)
-      [[ ! -s "$section" ]] || { printf 'Invalid Delete File section: %s\n' "$path" >&2; return 1; }
-      [[ -f "$target" ]] || { printf 'Failed to delete missing file: %s\n' "$path" >&2; return 1; }
-      rm "$target" || return 1
-      printf 'D %s\n' "$path"
-      ;;
-    update)
-      [[ -f "$target" ]] || { printf 'Failed to read file to update: %s\n' "$path" >&2; return 1; }
-      tmp=$(mktemp "${TMPDIR:-/tmp}/mini-agent-patch.XXXXXX") || return 1
-      if [[ -s "$section" ]]; then apply_update_section "$target" "$section" "$tmp" || { rm -f "$tmp"; return 1; }
-      else cp "$target" "$tmp" || { rm -f "$tmp"; return 1; }
-      fi
-      if [[ -n "$move" ]]; then
-        safe_patch_path "$move" || { printf 'Invalid move path: %s\n' "$move" >&2; rm -f "$tmp"; return 1; }
-        parent="$WORKDIR/${move%/*}"; [[ "$move" == */* ]] || parent=$WORKDIR
-        mkdir -p "$parent" || { rm -f "$tmp"; return 1; }
-        cp "$tmp" "$WORKDIR/$move" && rm "$target" || { rm -f "$tmp"; return 1; }
-      else
-        cp "$tmp" "$target" || { rm -f "$tmp"; return 1; }
-      fi
-      rm -f "$tmp"
-      printf 'M %s%s\n' "$path" "${move:+ -> $move}"
-      ;;
-  esac
-}
-
-apply_patch_text() {
-  local patch=$1 patch_file section action="" path="" move="" line first=1 ended=0 count=0 summary="" result
-  patch_file=$(mktemp "${TMPDIR:-/tmp}/mini-agent-patch-input.XXXXXX") || return 1
-  section=$(mktemp "${TMPDIR:-/tmp}/mini-agent-patch-section.XXXXXX") || { rm -f "$patch_file"; return 1; }
-  printf '%s\n' "$patch" > "$patch_file"
-  : > "$section"
-  while IFS= read -r line || [[ -n "$line" ]]; do
-    line=${line%$'\r'}
-    if [[ "$first" -eq 1 ]]; then
-      first=0
-      [[ "$line" == "*** Begin Patch" ]] || { printf 'Invalid patch: missing Begin Patch marker\n' >&2; rm -f "$patch_file" "$section"; return 1; }
-      continue
-    fi
-    case "$line" in
-      "*** Add File: "*|"*** Delete File: "*|"*** Update File: "*|"*** End Patch")
-        if [[ -n "$action" ]]; then
-          result=$(apply_patch_section "$action" "$path" "$move" "$section") || { rm -f "$patch_file" "$section"; return 1; }
-          summary="${summary}${result}"$'\n'; count=$((count + 1))
-          action=""; path=""; move=""; : > "$section"
-        fi
-        case "$line" in
-          "*** Add File: "*) action=add; path=${line#"*** Add File: "} ;;
-          "*** Delete File: "*) action=delete; path=${line#"*** Delete File: "} ;;
-          "*** Update File: "*) action=update; path=${line#"*** Update File: "} ;;
-          "*** End Patch") ended=1 ;;
-        esac
-        ;;
-      "*** Move to: "*)
-        [[ "$action" == update && -z "$move" && ! -s "$section" ]] || { printf 'Invalid Move to header\n' >&2; rm -f "$patch_file" "$section"; return 1; }
-        move=${line#"*** Move to: "}
-        ;;
-      *)
-        [[ "$ended" -eq 0 && -n "$action" ]] || { printf 'Invalid patch line: %s\n' "$line" >&2; rm -f "$patch_file" "$section"; return 1; }
-        printf '%s\n' "$line" >> "$section"
-        ;;
-    esac
-  done < "$patch_file"
-  rm -f "$patch_file" "$section"
-  [[ "$ended" -eq 1 && "$count" -gt 0 ]] || { printf 'Invalid patch: missing End Patch marker or file sections\n' >&2; return 1; }
-  printf 'Success. Updated the following files:\n%s' "$summary"
-}
-
-run_apply_patch() {
-  local patch=$1 output status
-  output=$(apply_patch_text "$patch" 2>&1); status=$?
-  [[ -n "$output" ]] || output="No files were modified."
-  "$JQ_BIN" -cn --arg text "$output" --argjson status "$status" '{kind:"text",text:$text,exit_status:$status}'
 }
 
 native_attachment() {
@@ -794,7 +655,7 @@ process_openai_shell_calls() {
 }
 
 run_tool() {
-  local name=$1 input=$2 command_text patch path offset limit
+  local name=$1 input=$2 command_text path offset limit
   case "$name" in
     read)
       path=$(printf '%s' "$input" | "$JQ_BIN" -r '.path // empty')
@@ -809,12 +670,6 @@ run_tool() {
       [[ -n "$command_text" ]] || { "$JQ_BIN" -cn '{kind:"error",text:"bash requires command"}'; return; }
       info "${C_CYAN}bash${C_RESET} $command_text"
       run_bash "$command_text"
-      ;;
-    apply_patch)
-      patch=$(printf '%s' "$input" | "$JQ_BIN" -r '.patch // empty')
-      [[ -n "$patch" ]] || { "$JQ_BIN" -cn '{kind:"error",text:"apply_patch requires patch"}'; return; }
-      info "${C_CYAN}apply_patch${C_RESET}"
-      run_apply_patch "$patch"
       ;;
     *) "$JQ_BIN" -cn --arg t "Unknown tool: $name" '{kind:"error",text:$t}' ;;
   esac
@@ -870,12 +725,6 @@ process_anthropic_calls() {
     <(printf '%s\n' "$HISTORY") <(printf '%s\n' "$results"))
 }
 
-strip_media_history() {
-  HISTORY=$(printf '%s' "$HISTORY" | "$JQ_BIN" -c '
-    ((.. | objects | select(.type? == "image_url") | .image_url.url) = "data:image/omitted;base64,") |
-    ((.. | objects | select(.type? == "image" and .source.type? == "base64") | .source.data) = "(image already delivered)")')
-}
-
 agent_turn_openai() {
   local user_text=$1 turn call_count text input user_message
   input=$(printf '%s' "$user_text" | "$JQ_BIN" -Rsc '[{role:"user",content:[{type:"input_text",text:.}]}]')
@@ -887,15 +736,14 @@ agent_turn_openai() {
     info "model ${TURN_MODEL:-$MODEL} · openai responses · reasoning $REASONING · turn $turn/$MAX_TURNS"
     if [[ "$OPENAI_NEEDS_RESTART" -eq 1 ]]; then input=$(openai_history_input); OPENAI_NEEDS_RESTART=0; fi
     call_with_fallback call_openai_responses "$input" || return 1
-    CONTEXT_TOKENS=$(response_context_tokens)
+    CONTEXT_TOKENS=$(response_context_tokens); CONTEXT_TOKENS_KNOWN=1
     call_count=$(printf '%s' "$API_RESPONSE" | "$JQ_BIN" '[.output[]? | select(.type == "shell_call" or .type == "function_call")] | length')
     text=$(printf '%s' "$API_RESPONSE" | "$JQ_BIN" -r \
       '[.output[]? | select(.type == "message") | .content[]? | select(.type == "output_text") | .text] | join("\n")')
     record_openai_response
     if [[ "$call_count" -gt 0 ]]; then
       process_openai_shell_calls
-      maybe_compact || return 1
-      if [[ "$OPENAI_NEEDS_RESTART" -eq 1 ]]; then input='[]'; else input=$OPENAI_NEXT_INPUT; fi
+      input=$OPENAI_NEXT_INPUT
     else
       LAST_ANSWER=$text
       maybe_compact || return 1
@@ -920,11 +768,10 @@ agent_turn() {
     info "model ${TURN_MODEL:-$MODEL} · $PROVIDER · reasoning $REASONING · turn $turn/$MAX_TURNS"
     if [[ "$PROVIDER" == "anthropic" ]]; then
       call_with_fallback call_anthropic || return 1
-      CONTEXT_TOKENS=$(response_context_tokens)
-      strip_media_history
+      CONTEXT_TOKENS=$(response_context_tokens); CONTEXT_TOKENS_KNOWN=1
       call_count=$(printf '%s' "$API_RESPONSE" | "$JQ_BIN" '[.content[] | select(.type == "tool_use")] | length')
       text=$(printf '%s' "$API_RESPONSE" | "$JQ_BIN" -r '[.content[] | select(.type == "text") | .text] | join("\n")')
-      if [[ "$call_count" -gt 0 ]]; then process_anthropic_calls; maybe_compact || return 1
+      if [[ "$call_count" -gt 0 ]]; then process_anthropic_calls
       else
         assistant_content=$(printf '%s' "$API_RESPONSE" | "$JQ_BIN" -c '.content')
         HISTORY=$("$JQ_BIN" -cs '.[0] + [{role:"assistant",content:.[1]}]' \
@@ -933,11 +780,10 @@ agent_turn() {
       fi
     else
       call_with_fallback call_openrouter || return 1
-      CONTEXT_TOKENS=$(response_context_tokens)
-      strip_media_history
+      CONTEXT_TOKENS=$(response_context_tokens); CONTEXT_TOKENS_KNOWN=1
       call_count=$(printf '%s' "$API_RESPONSE" | "$JQ_BIN" '.choices[0].message.tool_calls // [] | length')
       text=$(printf '%s' "$API_RESPONSE" | "$JQ_BIN" -r '.choices[0].message.content // ""')
-      if [[ "$call_count" -gt 0 ]]; then process_openai_calls; maybe_compact || return 1
+      if [[ "$call_count" -gt 0 ]]; then process_openai_calls
       else
         assistant_content=$(printf '%s' "$API_RESPONSE" | "$JQ_BIN" -c '.choices[0].message')
         HISTORY=$("$JQ_BIN" -cs '.[0] + [.[1]]' \
@@ -960,11 +806,27 @@ print_answer() {
   fi
 }
 
+print_status() {
+  local messages remaining percent
+  messages=$(printf '%s' "$HISTORY" | "$JQ_BIN" 'length')
+  printf 'provider: %s\nmodel: %s\nfallback model: %s\nmessages: %s\n' "$PROVIDER" "${TURN_MODEL:-$MODEL}" "$FALLBACK_MODEL" "$messages"
+  if [[ "$CONTEXT_TOKENS_KNOWN" -eq 1 ]]; then
+    remaining=$((COMPACT_TOKENS - CONTEXT_TOKENS)); [[ "$remaining" -lt 0 ]] && remaining=0
+    percent=$((CONTEXT_TOKENS * 100 / COMPACT_TOKENS))
+    printf 'conversation tokens: %s / %s (%s%%)\ntokens until compaction: %s\n' "$CONTEXT_TOKENS" "$COMPACT_TOKENS" "$percent" "$remaining"
+  else
+    printf 'conversation tokens: unknown (next model response will refresh them)\ncompaction threshold: %s\n' "$COMPACT_TOKENS"
+  fi
+  printf 'maximum output tokens: %s\nmaximum turns: %s\n' "$MAX_TOKENS" "$MAX_TURNS"
+}
+
 interactive_help() {
   cat <<'EOF'
 /model NAME       switch model and clear history
 /provider NAME    switch provider and clear history
 /reasoning LEVEL  change reasoning effort
+/compact          compact conversation context now
+/status           show conversation token statistics
 /clear            clear conversation history
 /help             show these commands
 /quit             exit
@@ -982,9 +844,11 @@ interactive_loop() {
     case "$line" in
       /quit|/exit) break ;;
       /help) interactive_help ;;
-      /clear) HISTORY='[]'; OPENAI_PREVIOUS_RESPONSE_ID=""; OPENAI_NEEDS_RESTART=0; CONTEXT_TOKENS=0; printf 'history cleared\n' ;;
-      /model\ *) value=${line#* }; MODEL=$value; HISTORY='[]'; OPENAI_PREVIOUS_RESPONSE_ID=""; OPENAI_NEEDS_RESTART=0; CONTEXT_TOKENS=0; printf 'model: %s (history cleared)\n' "$MODEL" ;;
-      /provider\ *) value=${line#* }; PROVIDER=$value; MODEL=""; FALLBACK_MODEL=""; HISTORY='[]'; OPENAI_PREVIOUS_RESPONSE_ID=""; OPENAI_NEEDS_RESTART=0; CONTEXT_TOKENS=0; select_provider; printf 'provider: %s, model: %s (history cleared)\n' "$PROVIDER" "$MODEL" ;;
+      /compact) if compact_history; then printf 'context compacted\n'; else printf 'compaction failed\n' >&2; fi ;;
+      /status) print_status ;;
+      /clear) HISTORY='[]'; TURN_MODEL=""; OPENAI_PREVIOUS_RESPONSE_ID=""; OPENAI_NEEDS_RESTART=0; CONTEXT_TOKENS=0; CONTEXT_TOKENS_KNOWN=0; printf 'history cleared\n' ;;
+      /model\ *) value=${line#* }; MODEL=$value; TURN_MODEL=""; HISTORY='[]'; OPENAI_PREVIOUS_RESPONSE_ID=""; OPENAI_NEEDS_RESTART=0; CONTEXT_TOKENS=0; CONTEXT_TOKENS_KNOWN=0; printf 'model: %s (history cleared)\n' "$MODEL" ;;
+      /provider\ *) value=${line#* }; PROVIDER=$value; MODEL=""; FALLBACK_MODEL=""; TURN_MODEL=""; HISTORY='[]'; OPENAI_PREVIOUS_RESPONSE_ID=""; OPENAI_NEEDS_RESTART=0; CONTEXT_TOKENS=0; CONTEXT_TOKENS_KNOWN=0; select_provider; printf 'provider: %s, model: %s (history cleared)\n' "$PROVIDER" "$MODEL" ;;
       /reasoning\ *) value=${line#* }; REASONING=$value; case "$REASONING" in default|none|minimal|low|medium|high|xhigh|max) printf 'reasoning: %s\n' "$REASONING" ;; *) printf 'invalid reasoning level\n'; REASONING="medium" ;; esac ;;
       /*) printf 'unknown command; use /help\n' ;;
       *) if agent_turn "$line"; then print_answer; else printf 'request failed\n' >&2; fi ;;
