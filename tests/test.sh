@@ -233,13 +233,16 @@ set timeout 15
 log_user 0
 set root $env(EXPECT_ROOT)
 set tmp $env(EXPECT_TMP)
-spawn bash -c "cat '$root/miniagent.sh' | env OPENAI_API_KEY=test CURL_BIN='$tmp/curl' bash"
+spawn bash -c "cat '$root/miniagent.sh' | env OPENAI_API_KEY=test MOCK_DELAY=1 CURL_BIN='$tmp/curl' bash"
 expect "miniagent openai"
+expect "> "
+send -- "inspect\r"
+expect "openai done"
 expect "> "
 send -- "/quit\r"
 expect eof
 EXPECT_PIPED_SCRIPT
-  if [[ $? -eq 0 ]]; then ok "Piped script reconnects to the terminal for interactive mode"; else not_ok "Piped script reconnects to the terminal for interactive mode"; fi
+  if [[ $? -eq 0 ]]; then ok "Piped script completes an interactive model turn"; else not_ok "Piped script completes an interactive model turn"; fi
 
   EXPECT_ROOT="$ROOT" EXPECT_TMP="$TMP" expect <<'EXPECT_QUEUE'
 set timeout 15

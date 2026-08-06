@@ -27,7 +27,7 @@ curl -fsSL https://miniagent.sh | bash
 
 - Bash 3.2+
 - `curl` and `jq`
-- Standard Unix utilities used by the harness: `awk`, `base64`, `cat`, `chmod`, `cp`, `date`, `find`, `head`, `mkdir`, `mktemp`, `rm`, `sort`, `stty`, `tail`, `tr`, `uname`, and `wc`
+- Standard Unix utilities used by the harness: `awk`, `base64`, `cat`, `chmod`, `cp`, `date`, `dd`, `find`, `head`, `mkdir`, `mktemp`, `rm`, `sort`, `stty`, `tail`, `tr`, `uname`, and `wc`
 - Standard agent editing and inspection utilities: `sed` and `nl`
 - Optional: `file` for MIME detection, `strings` for extracting text from unknown binary files, and GNU `timeout` (or `gtimeout`) to enforce command timeouts
 

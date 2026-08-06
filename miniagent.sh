@@ -31,7 +31,6 @@ INTERACTIVE_INPUT_CLOSED=0
 INTERACTIVE_INPUT_BUFFER=""
 INTERACTIVE_INPUT_PROMPT_VISIBLE=0
 INTERACTIVE_STTY_STATE=""
-INTERACTIVE_INPUT_FD_OPEN=0
 INTERACTIVE_QUEUED_MESSAGES='[]'
 INTERACTIVE_QUEUED_BATCH='[]'
 INTERACTIVE_QUEUED_COUNT=0
@@ -150,13 +149,16 @@ hide_interactive_input_prompt() {
   printf '\r\033[2K' >&2
   INTERACTIVE_INPUT_PROMPT_VISIBLE=0
 }
-wait_for_process() {
-  local pid=$1 char
-  if [[ "$INTERACTIVE_EXECUTION" -ne 1 || "$INTERACTIVE_CAPTURE_ENABLED" -ne 1 ]]; then wait "$pid"; return; fi
+wait_for_process_interactive() {
+  local pid=$1 char input_file
+  input_file=$(mktemp "${TMPDIR:-/tmp}/miniagent-input.XXXXXX") || { wait "$pid"; return; }
   show_interactive_input_prompt
   while kill -0 "$pid" 2>/dev/null; do
-    if [[ "$INTERACTIVE_INPUT_CLOSED" -eq 1 ]]; then hide_interactive_input_prompt; wait "$pid"; return; fi
-    if IFS= read -r -n 1 -t 1 char <&9; then
+    if [[ "$INTERACTIVE_INPUT_CLOSED" -eq 1 ]]; then hide_interactive_input_prompt; rm -f "$input_file"; wait "$pid"; return; fi
+    : > "$input_file"
+    dd bs=1 count=1 > "$input_file" 2>/dev/null
+    if [[ -s "$input_file" ]]; then
+      char=$(cat "$input_file")
       case "$char" in
         $'\004')
           if [[ -n "$INTERACTIVE_INPUT_BUFFER" ]]; then
@@ -192,14 +194,18 @@ wait_for_process() {
     fi
   done
   hide_interactive_input_prompt
+  rm -f "$input_file"
   wait "$pid"
+}
+wait_for_process() {
+  local pid=$1
+  if [[ "$INTERACTIVE_EXECUTION" -ne 1 || "$INTERACTIVE_CAPTURE_ENABLED" -ne 1 ]]; then wait "$pid"; return; fi
+  wait_for_process_interactive "$pid" </dev/tty
 }
 restore_interactive_terminal() {
   hide_interactive_input_prompt
   if [[ -n "$INTERACTIVE_STTY_STATE" ]]; then stty "$INTERACTIVE_STTY_STATE" 2>/dev/null || true; fi
-  if [[ "$INTERACTIVE_INPUT_FD_OPEN" -eq 1 ]]; then exec 9<&-; fi
   INTERACTIVE_STTY_STATE=""
-  INTERACTIVE_INPUT_FD_OPEN=0
   INTERACTIVE_CAPTURE_ENABLED=0
 }
 take_interactive_messages() {
@@ -1261,8 +1267,7 @@ run_interactive_agent_turn() {
   INTERACTIVE_QUEUED_COUNT=0
   if [[ -t 0 ]]; then
     INTERACTIVE_STTY_STATE=$(stty -g 2>/dev/null || true)
-    if [[ -n "$INTERACTIVE_STTY_STATE" ]] && stty -echo eof undef 2>/dev/null && exec 9<&0; then
-      INTERACTIVE_INPUT_FD_OPEN=1
+    if [[ -n "$INTERACTIVE_STTY_STATE" ]] && stty -echo -icanon min 0 time 10 eof undef 2>/dev/null; then
       INTERACTIVE_CAPTURE_ENABLED=1
       trap 'restore_interactive_terminal' EXIT
     fi
