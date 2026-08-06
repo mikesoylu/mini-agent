@@ -454,6 +454,15 @@ maybe_compact() {
   info "${C_CYAN}compact${C_RESET} context $CONTEXT_TOKENS/$COMPACT_TOKENS tokens"
   compact_history "$pending"
 }
+
+context_usage() {
+  if [[ "$CONTEXT_TOKENS_KNOWN" -eq 1 ]]; then
+    printf '%s/%s' "$CONTEXT_TOKENS" "$COMPACT_TOKENS"
+  else
+    printf 'unknown/%s' "$COMPACT_TOKENS"
+  fi
+}
+
 openai_history_input() {
   local conversation
   conversation=$(printf '%s' "$HISTORY" | serialization_prompt)
@@ -733,7 +742,7 @@ agent_turn_openai() {
   LAST_ANSWER=""
   turn=1
   while [[ "$turn" -le "$MAX_TURNS" ]]; do
-    info "model ${TURN_MODEL:-$MODEL} · openai responses · reasoning $REASONING · turn $turn/$MAX_TURNS"
+    info "model ${TURN_MODEL:-$MODEL} · openai responses · reasoning $REASONING · context $(context_usage) · turn $turn/$MAX_TURNS"
     if [[ "$OPENAI_NEEDS_RESTART" -eq 1 ]]; then input=$(openai_history_input); OPENAI_NEEDS_RESTART=0; fi
     call_with_fallback call_openai_responses "$input" || return 1
     CONTEXT_TOKENS=$(response_context_tokens); CONTEXT_TOKENS_KNOWN=1
@@ -765,7 +774,7 @@ agent_turn() {
   LAST_ANSWER=""
   turn=1
   while [[ "$turn" -le "$MAX_TURNS" ]]; do
-    info "model ${TURN_MODEL:-$MODEL} · $PROVIDER · reasoning $REASONING · turn $turn/$MAX_TURNS"
+    info "model ${TURN_MODEL:-$MODEL} · $PROVIDER · reasoning $REASONING · context $(context_usage) · turn $turn/$MAX_TURNS"
     if [[ "$PROVIDER" == "anthropic" ]]; then
       call_with_fallback call_anthropic || return 1
       CONTEXT_TOKENS=$(response_context_tokens); CONTEXT_TOKENS_KNOWN=1

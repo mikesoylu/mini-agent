@@ -99,6 +99,10 @@ if [[ $(uname -s) == Darwin ]]; then assert_contains "$(jq -r '.instructions' "$
 assert_contains "$(jq -r '.input[] | select(.type == "shell_call_output") | .output[0].stdout' "$TMP/openai.json")" "hello from fixture" "OpenAI shell output continuation"
 assert_equal "$(jq -r '.model' "$TMP/openai.json")" "gpt-5.6-sol" "OpenAI default model"
 
+progress=$(OPENAI_API_KEY=test CURL_BIN="$TMP/curl" "$ROOT/mini-agent.sh" -m gpt-5.6-sol -C "$TMP" "inspect" 2>&1 >/dev/null)
+assert_contains "$progress" "context unknown/262144 · turn 1/1024" "Progress shows unknown context before initial usage"
+assert_contains "$progress" "context 50/262144 · turn 2/1024" "Progress shows latest provider context usage"
+
 out=$(ANTHROPIC_API_KEY=test MOCK_CAPTURE="$TMP/anthropic.json" CURL_BIN="$TMP/curl" "$ROOT/mini-agent.sh" -q -p anthropic -C "$TMP" "inspect")
 assert_contains "$out" "anthropic done" "Anthropic tool loop"
 assert_equal "$(jq -r '.model' "$TMP/anthropic.json")" "claude-opus-5" "Anthropic default model"
