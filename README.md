@@ -17,9 +17,8 @@ A deliberately small coding-agent harness inspired by mini-swe-agent. It is impl
 
 - Bash 3.2+
 - `curl` and `jq`
-- Standard Unix utilities used by the harness: `awk`, `base64`, `cat`, `date`, `find`, `head`, `mktemp`, `rm`, `sort`, `tail`, `tr`, `uname`, and `wc`
+- Standard Unix utilities used by the harness: `awk`, `base64`, `cat`, `chmod`, `cp`, `date`, `find`, `head`, `mkdir`, `mktemp`, `rm`, `sort`, `tail`, `tr`, `uname`, and `wc`
 - Standard agent editing and inspection utilities: `sed` and `nl`
-- The install one-liner additionally uses `mkdir` and `chmod`
 - Optional: `file` for MIME detection, `strings` for extracting text from unknown binary files, and GNU `timeout` (or `gtimeout`) to enforce command timeouts
 
 ## Install
@@ -82,6 +81,8 @@ printf 'List the main components' | ./mini-agent.sh -p openai
 | `-n, --max-turns N` | Maximum model calls for each user request | `1024` |
 | `--max-tokens N` | Maximum output tokens for each model call | `32768` |
 | `--compact-tokens N` | Provider-reported context usage that triggers compaction | `262144` |
+| `--debug` | Write a diagnostic bundle under the system temp directory | Off |
+| `--debug-dir DIR` | Write the diagnostic bundle to a specific directory | Off |
 | `-i, --interactive` | Stay interactive after an initial task | Off |
 | `--json` | Return `{provider, model, fallback_model, reasoning, answer}` | Off |
 | `-q, --quiet` | Hide model and tool progress written to stderr | Off |
@@ -132,11 +133,13 @@ The default base URLs are the providers' public APIs. `ANTHROPIC_VERSION` defaul
 | `MINI_AGENT_MAX_TURNS` | Model calls per user request | `1024` |
 | `MINI_AGENT_MAX_TOKENS` | Output tokens per model call | `32768` |
 | `MINI_AGENT_COMPACT_TOKENS` | Automatic compaction threshold | `262144` |
-| `MINI_AGENT_COMPACT_MAX_TOKENS` | Maximum checkpoint-summary output | `13107` |
+| `MINI_AGENT_COMPACT_MAX_TOKENS` | Upper bound for checkpoint-summary output; also capped at half the compaction threshold | `13107` |
 | `MINI_AGENT_MAX_TOOL_OUTPUT` | Maximum captured bytes for each stdout/stderr stream or compatible-tool result | `30000` |
 | `MINI_AGENT_TOOL_TIMEOUT` | Maximum command runtime in seconds when `timeout` or `gtimeout` is installed | `120` |
 | `MINI_AGENT_API_TIMEOUT` | Maximum API request time in seconds | `600` |
 | `MINI_AGENT_WORKDIR` | Agent working directory | Current directory |
+| `MINI_AGENT_DEBUG` | Enable diagnostic logging with `1` | `0` |
+| `MINI_AGENT_DEBUG_DIR` | Diagnostic bundle directory; otherwise a temporary directory is created | System temp directory |
 
 `CURL_BIN` and `JQ_BIN` may also be set to alternate executable paths, primarily for testing.
 
@@ -153,9 +156,17 @@ PDF input is not supported. Tool output larger than `MINI_AGENT_MAX_TOOL_OUTPUT`
 
 ## Context compaction
 
-After each model response, mini-agent records exact context usage reported by the provider; Anthropic cache-read and cache-creation tokens are included. Automatic compaction waits for the current agent loop to finish so no tool call is left unresolved.
+After each model response, mini-agent records exact context usage reported by the provider; Anthropic cache-read and cache-creation tokens are included. Automatic compaction can run between tool-call rounds during a single agent turn. Before compacting, mini-agent executes every tool call in the current response and appends every result, so the provider never receives a checkpoint request with an unresolved tool call.
 
-Compaction asks the active model for a structured checkpoint, replaces older history with that checkpoint, and retains the latest complete turn. The request is appended to the existing provider-native conversation to preserve the cacheable prefix. OpenAI keeps its `previous_response_id` chain for the summary request, then starts a fresh chain from the compacted transcript. Image paths and short visual summaries are explicitly preserved in the checkpoint. Token usage is shown as unknown until the next normal response refreshes it.
+Compaction asks the active model for a structured checkpoint, replaces older history with that checkpoint, and retains the latest complete turn. Checkpoint output is capped at the lowest of `MINI_AGENT_COMPACT_MAX_TOKENS`, half of the compaction threshold, and the normal model-output limit. The request is appended to the existing provider-native conversation to preserve the cacheable prefix. For mid-turn compaction, mini-agent appends a fresh continuation message after the checkpoint and tool results so the model resumes the original task instead of acknowledging the checkpoint. OpenAI keeps its `previous_response_id` chain for the summary request, then starts a fresh chain from the compacted transcript; the complete checkpoint is preserved when rebuilding that chain, while ordinary historical messages and tool output remain clipped. Image paths and short visual summaries are explicitly preserved in the checkpoint. Token usage is shown as unknown until the next normal response refreshes it.
+
+If automatic compaction fails, mini-agent records the failure and continues the current agent turn with its existing history and resolved tool results. Manual `/compact` still reports failure directly.
+
+## Debug logging
+
+Pass `--debug` or set `MINI_AGENT_DEBUG=1` to create a per-process diagnostic bundle named `mini-agent-debug.<pid>.*` under `${TMPDIR:-/tmp}`. The bundle path is printed to stderr. Use `--debug-dir DIR` or `MINI_AGENT_DEBUG_DIR` to choose its location.
+
+The bundle includes an event log with timestamps, PID, process lifecycle, configuration and state transitions; complete provider request and response bodies; compaction prompts, pending tool results, histories and summaries; and raw tool stdout/stderr. The process environment and API authorization headers are never logged. The directory and its files are restricted to the current user where the platform permits it. Request bodies and tool output can still contain sensitive repository or command data, so share debug bundles carefully.
 
 ## Refusal fallback
 

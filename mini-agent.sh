@@ -15,6 +15,10 @@ MAX_TOOL_OUTPUT="${MINI_AGENT_MAX_TOOL_OUTPUT:-30000}"
 TOOL_TIMEOUT="${MINI_AGENT_TOOL_TIMEOUT:-120}"
 API_TIMEOUT="${MINI_AGENT_API_TIMEOUT:-600}"
 WORKDIR="${MINI_AGENT_WORKDIR:-$PWD}"
+DEBUG="${MINI_AGENT_DEBUG:-0}"
+DEBUG_DIR="${MINI_AGENT_DEBUG_DIR:-}"
+DEBUG_LOG=""
+DEBUG_ARGV=()
 OUTPUT_FORMAT="text"
 INTERACTIVE=0
 QUIET=0
@@ -35,7 +39,7 @@ else
 fi
 say() { [[ "$QUIET" -eq 1 ]] || printf '%s\n' "$*" >&2; }
 info() { say "${C_DIM}$*${C_RESET}"; }
-die() { printf '%smini-agent: %s%s\n' "$C_RED" "$*" "$C_RESET" >&2; exit 1; }
+die() { debug_log "fatal message=$(printf '%q' "$*")"; printf '%smini-agent: %s%s\n' "$C_RED" "$*" "$C_RESET" >&2; exit 1; }
 usage() {
   cat <<'EOF'
 mini-agent - a tiny Bash-only coding agent
@@ -53,6 +57,8 @@ Options:
   -n, --max-turns N       Maximum model calls per user turn (default: 1024)
       --max-tokens N      Maximum output tokens per model call (default: 32768)
       --compact-tokens N  Compact context at this token count (default: 262144)
+      --debug             Write a diagnostic bundle under the system temp directory
+      --debug-dir DIR     Write the diagnostic bundle to DIR (enables --debug)
   -i, --interactive       Stay interactive after an initial task
       --json              JSON output in CLI mode
   -q, --quiet             Hide tool progress
@@ -65,7 +71,8 @@ Environment:
   OPENROUTER_API_KEY, OPENROUTER_BASE_URL, OPENROUTER_MODEL, OPENROUTER_FALLBACK_MODEL
   MINI_AGENT_PROVIDER, MINI_AGENT_MODEL, MINI_AGENT_FALLBACK_MODEL, MINI_AGENT_REASONING
   MINI_AGENT_MAX_TURNS, MINI_AGENT_MAX_TOKENS, MINI_AGENT_COMPACT_TOKENS
-  MINI_AGENT_COMPACT_MAX_TOKENS, MINI_AGENT_TOOL_TIMEOUT
+  MINI_AGENT_COMPACT_MAX_TOKENS, MINI_AGENT_TOOL_TIMEOUT, MINI_AGENT_DEBUG
+  MINI_AGENT_DEBUG_DIR
   OPENROUTER_HTTP_REFERER, OPENROUTER_APP_NAME
 
 Interactive commands:
@@ -74,6 +81,73 @@ EOF
 }
 need_cmd() { command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"; }
 is_uint() { [[ "$1" =~ ^[1-9][0-9]*$ ]]; }
+debug_log() {
+  [[ -n "$DEBUG_LOG" ]] || return 0
+  printf '%s pid=%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$$" "$*" >> "$DEBUG_LOG"
+}
+debug_dump() {
+  local label=$1 content=$2 path bytes
+  [[ -n "$DEBUG_LOG" ]] || return 0
+  path=$(mktemp "$DEBUG_DIR/$label.XXXXXX") || { debug_log "artifact_failed label=$label"; return 1; }
+  printf '%s' "$content" > "$path"
+  chmod 600 "$path" 2>/dev/null || true
+  bytes=$(wc -c < "$path" | tr -d ' ')
+  debug_log "artifact label=$label bytes=$bytes path=$path"
+}
+debug_dump_file() {
+  local label=$1 source=$2 path bytes
+  [[ -n "$DEBUG_LOG" ]] || return 0
+  [[ -f "$source" ]] || { debug_log "artifact_source_missing label=$label source=$source"; return 1; }
+  path=$(mktemp "$DEBUG_DIR/$label.XXXXXX") || { debug_log "artifact_failed label=$label"; return 1; }
+  cp "$source" "$path" || return 1
+  chmod 600 "$path" 2>/dev/null || true
+  bytes=$(wc -c < "$path" | tr -d ' ')
+  debug_log "artifact label=$label bytes=$bytes path=$path"
+}
+debug_state() {
+  local label=$1 state
+  [[ -n "$DEBUG_LOG" ]] || return 0
+  state=$("$JQ_BIN" -cn \
+    --arg provider "$PROVIDER" --arg model "$MODEL" --arg turn_model "$TURN_MODEL" \
+    --arg fallback_model "$FALLBACK_MODEL" --arg reasoning "$REASONING" --arg workdir "$WORKDIR" \
+    --arg api_url "${API_URL:-}" --arg previous_response_id "$OPENAI_PREVIOUS_RESPONSE_ID" \
+    --arg needs_restart "$OPENAI_NEEDS_RESTART" --arg context_tokens "$CONTEXT_TOKENS" \
+    --arg context_known "$CONTEXT_TOKENS_KNOWN" --arg compact_tokens "$COMPACT_TOKENS" \
+    --arg history_length "$(printf '%s' "$HISTORY" | "$JQ_BIN" 'length' 2>/dev/null || printf 0)" \
+    '{provider:$provider,model:$model,turn_model:$turn_model,fallback_model:$fallback_model,
+      reasoning:$reasoning,workdir:$workdir,api_url:$api_url,previous_response_id:$previous_response_id,
+      needs_restart:($needs_restart|tonumber),context_tokens:($context_tokens|tonumber),
+      context_known:($context_known|tonumber),compact_tokens:($compact_tokens|tonumber),
+      history_length:($history_length|tonumber)}') || return 1
+  debug_dump "state-$label.json" "$state"
+}
+init_debug() {
+  local arg index=0 meta
+  case "$DEBUG" in
+    1|true|TRUE|yes|YES|on|ON) DEBUG=1 ;;
+    0|false|FALSE|no|NO|off|OFF|'') DEBUG=0; return 0 ;;
+    *) die "MINI_AGENT_DEBUG must be 0 or 1" ;;
+  esac
+  if [[ -n "$DEBUG_DIR" ]]; then
+    mkdir -p "$DEBUG_DIR" || die "cannot create debug directory: $DEBUG_DIR"
+    DEBUG_DIR=$(cd "$DEBUG_DIR" 2>/dev/null && pwd -P) || die "cannot enter debug directory"
+  else
+    DEBUG_DIR=$(mktemp -d "${TMPDIR:-/tmp}/mini-agent-debug.$$.XXXXXX") || die "cannot create debug directory"
+  fi
+  chmod 700 "$DEBUG_DIR" 2>/dev/null || true
+  DEBUG_LOG="$DEBUG_DIR/events.log"
+  : > "$DEBUG_LOG"
+  chmod 600 "$DEBUG_LOG" 2>/dev/null || true
+  printf 'mini-agent: debug bundle: %s\n' "$DEBUG_DIR" >&2
+  debug_log "session_start ppid=$PPID uid=${UID:-unknown} euid=${EUID:-unknown} bash=${BASH_VERSION:-unknown} cwd=$PWD"
+  for arg in "${DEBUG_ARGV[@]}"; do
+    debug_log "argv[$index]=$(printf '%q' "$arg")"
+    index=$((index + 1))
+  done
+  meta=$(printf 'script=%s\npid=%s\nppid=%s\nuid=%s\neuid=%s\nbash_version=%s\ncwd=%s\ntmpdir=%s\nuname=%s\n' \
+    "${BASH_SOURCE[0]}" "$$" "$PPID" "${UID:-unknown}" "${EUID:-unknown}" "${BASH_VERSION:-unknown}" "$PWD" "${TMPDIR:-/tmp}" "$(uname -a 2>/dev/null || printf unknown)")
+  debug_dump session.txt "$meta"
+}
 parse_args() {
   local parts=()
   while [[ $# -gt 0 ]]; do
@@ -86,6 +160,8 @@ parse_args() {
       -n|--max-turns) [[ $# -ge 2 ]] || die "$1 requires a value"; MAX_TURNS=$2; shift 2 ;;
       --max-tokens) [[ $# -ge 2 ]] || die "$1 requires a value"; MAX_TOKENS=$2; shift 2 ;;
       --compact-tokens) [[ $# -ge 2 ]] || die "$1 requires a value"; COMPACT_TOKENS=$2; shift 2 ;;
+      --debug) DEBUG=1; shift ;;
+      --debug-dir) [[ $# -ge 2 ]] || die "$1 requires a value"; DEBUG=1; DEBUG_DIR=$2; shift 2 ;;
       -i|--interactive) INTERACTIVE=1; shift ;;
       --json) OUTPUT_FORMAT="json"; shift ;;
       -q|--quiet) QUIET=1; shift ;;
@@ -200,6 +276,7 @@ nl -ba filename.py | sed -n '10,20p'
 \`\`\`
 
 Work autonomously until the task is complete. Inspect before changing, preserve unrelated work, and verify changes. Never claim a command succeeded unless its result says so. Keep final answers brief and include changed files and verification.
+Only attribute changes, commands, API calls, and verification to the current user request when they actually occurred during that request. Treat pre-existing working-tree changes as context, not work you performed. For read-only or explanatory requests, do not imply that files were changed.
 PROMPT_EOF
 }
 tools_compatible() {
@@ -217,6 +294,8 @@ tools_anthropic() {
 api_request() {
   local url=$1 key_header=$2 key=$3 body=$4 response_file status curl_status
   shift 4
+  debug_log "api_request_start provider=$PROVIDER model=${TURN_MODEL:-$MODEL} url=$url previous_response_id=${OPENAI_PREVIOUS_RESPONSE_ID:-none} body_bytes=$(printf '%s' "$body" | wc -c | tr -d ' ') extra_header_args=$#"
+  debug_dump api-request.json "$body"
   response_file=$(mktemp "${TMPDIR:-/tmp}/mini-agent-response.XXXXXX") || return 1
   status=$("$CURL_BIN" -sS --connect-timeout 20 --max-time "$API_TIMEOUT" \
     -o "$response_file" -w '%{http_code}' -X POST "$url" \
@@ -224,6 +303,8 @@ api_request() {
     --data-binary @- <<< "$body")
   curl_status=$?
   API_RESPONSE=$(<"$response_file")
+  debug_dump api-response.json "$API_RESPONSE"
+  debug_log "api_request_end provider=$PROVIDER model=${TURN_MODEL:-$MODEL} url=$url http_status=$status curl_status=$curl_status response_bytes=$(wc -c < "$response_file" | tr -d ' ')"
   rm -f "$response_file"
   if [[ $curl_status -ne 0 ]]; then
     printf 'network error (curl exit %s)\n' "$curl_status" >&2
@@ -363,14 +444,18 @@ serialization_prompt() {
   "$JQ_BIN" -r '
     def clipped:
       if length <= 2000 then . else .[0:1000] + "\n... " + ((length - 2000)|tostring) + " characters omitted ...\n" + .[-1000:] end;
+    def checkpoint:
+      .role == "user" and (.content | type) == "string" and
+      (.content | startswith("Another language model worked on this task and produced a context checkpoint."));
     def body:
       ((if (.content // null) == null then "" elif (.content|type) == "string" then .content else (.content|tojson) end) +
-       (if (.tool_calls // [] | length) > 0 then "\n[tool calls] " + (.tool_calls|tojson) else "" end)) | clipped;
+       (if (.tool_calls // [] | length) > 0 then "\n[tool calls] " + (.tool_calls|tojson) else "" end)) as $body |
+      if checkpoint then $body else ($body | clipped) end;
     map("[" + ((.role // "message") | ascii_upcase) + "]: " + body) | join("\n\n")'
 }
 compaction_user_prompt() {
   cat <<'EOF'
-Create a context checkpoint summarizing the conversation before this message. Do not continue the task or call tools. Preserve exact file paths, function names, commands, errors, constraints, decisions, and unfinished work. For every image attachment in the history, preserve its exact file path and a short summary of its relevant visual content; if either is unknown, say so rather than inventing it.
+Create a context checkpoint summarizing the conversation before this message. Respond immediately using only the checkpoint sections below and only information already present in the conversation. Omit this checkpoint-generation request and its directives from the checkpoint. Preserve exact file paths, function names, commands, errors, constraints, decisions, and unfinished work. For every image attachment in the history, preserve its exact file path and a short summary of its relevant visual content; if either is unknown, say so rather than inventing it.
 
 Use exactly these sections:
 
@@ -388,10 +473,21 @@ Use exactly these sections:
 Keep it concise and suitable for another model to continue without duplicating work.
 EOF
 }
+compaction_output_limit() {
+  local max=$COMPACT_MAX_TOKENS half=$((COMPACT_TOKENS / 2))
+  [[ "$half" -gt 0 ]] || half=1
+  [[ "$max" -le "$half" ]] || max=$half
+  [[ "$max" -le "$MAX_TOKENS" ]] || max=$MAX_TOKENS
+  printf '%s' "$max"
+}
 call_compaction_summary() {
-  local prompt=$1 pending=${2:-'[]'} max=$COMPACT_MAX_TOKENS summary refused reason input user status=0
+  local prompt=$1 pending=${2:-'[]'} max summary refused reason input user status=0
   local saved_history=$HISTORY saved_max=$MAX_TOKENS saved_previous=$OPENAI_PREVIOUS_RESPONSE_ID
-  [[ "$max" -gt "$MAX_TOKENS" ]] && max=$MAX_TOKENS
+  max=$(compaction_output_limit)
+  debug_log "compaction_summary_start provider=$PROVIDER model=${TURN_MODEL:-$MODEL} max_output_tokens=$max pending_items=$(printf '%s' "$pending" | "$JQ_BIN" 'length' 2>/dev/null || printf unknown) previous_response_id=${saved_previous:-none}"
+  debug_dump compaction-prompt.txt "$prompt"
+  debug_dump compaction-pending.json "$pending"
+  debug_dump compaction-history.json "$saved_history"
   MAX_TOKENS=$max
   case "$PROVIDER" in
     openai)
@@ -411,7 +507,8 @@ call_compaction_summary() {
       ;;
   esac
   HISTORY=$saved_history; MAX_TOKENS=$saved_max; OPENAI_PREVIOUS_RESPONSE_ID=$saved_previous
-  if [[ "$status" -ne 0 ]] && ! response_is_refusal; then return "$status"; fi
+  debug_log "compaction_summary_response status=$status restored_previous_response_id=${OPENAI_PREVIOUS_RESPONSE_ID:-none}"
+  if [[ "$status" -ne 0 ]] && ! response_is_refusal; then debug_log "compaction_summary_failed stage=api status=$status"; return "$status"; fi
   case "$PROVIDER" in
     openai) summary=$(printf '%s' "$API_RESPONSE" | "$JQ_BIN" -r '[.output[]? | select(.type == "message") | .content[]? | select(.type == "output_text") | .text] | join("\n")') ;;
     anthropic) summary=$(printf '%s' "$API_RESPONSE" | "$JQ_BIN" -r '[.content[]? | select(.type == "text") | .text] | join("\n")') ;;
@@ -425,34 +522,54 @@ call_compaction_summary() {
     fi
     printf 'compaction model %s refused: %s\n' "$refused" "$reason" >&2; return 1
   fi
-  [[ -n "$summary" ]] || { printf 'compaction returned an empty summary\n' >&2; return 1; }
+  debug_dump compaction-summary.txt "$summary"
+  [[ -n "$summary" ]] || { debug_log "compaction_summary_failed stage=extract reason=empty_summary"; printf 'compaction returned an empty summary\n' >&2; return 1; }
   COMPACTION_SUMMARY=$summary
+  debug_log "compaction_summary_complete bytes=$(printf '%s' "$summary" | wc -c | tr -d ' ')"
 }
 compact_history() {
-  local pending=${1:-'[]'} cut kept prompt summary prefix
+  local pending=${1:-'[]'} resume=${2:-0} cut kept prompt summary prefix continuation
   cut=$(printf '%s' "$HISTORY" | "$JQ_BIN" -r '
     ([to_entries[] | select(.value.role == "user" and (.value.content|type) == "string") | .key] | last // -1) as $user |
     (.[0].content? | type == "string" and startswith("Another language model worked on this task")) as $already_compacted |
     if $user > 0 and (($already_compacted and $user == 1) | not) then $user
     else ([to_entries[] | select(.value.role == "assistant" and .key > 0) | .key] | last // -1) end')
-  [[ "$cut" -gt 0 ]] || { printf 'context is too large but has no safe compaction boundary\n' >&2; return 1; }
+  debug_log "compact_history_start provider=$PROVIDER resume=$resume cut=$cut history_length=$(printf '%s' "$HISTORY" | "$JQ_BIN" 'length' 2>/dev/null || printf unknown)"
+  debug_dump compact-history-before.json "$HISTORY"
+  [[ "$cut" -gt 0 ]] || { debug_log "compact_history_failed reason=no_safe_boundary"; printf 'context is too large but has no safe compaction boundary\n' >&2; return 1; }
   kept=$(printf '%s' "$HISTORY" | "$JQ_BIN" -c --argjson cut "$cut" '.[$cut:]')
+  debug_dump compact-history-kept.json "$kept"
   prompt=$(compaction_user_prompt)
   call_compaction_summary "$prompt" "$pending" || return 1
   summary=$COMPACTION_SUMMARY
   prefix="Another language model worked on this task and produced a context checkpoint. Use it to continue without duplicating effort:\n\n$summary"
   HISTORY=$("$JQ_BIN" -cn --arg prefix "$prefix" --argjson kept "$kept" '[{role:"user",content:$prefix}] + $kept')
+  if [[ "$resume" -eq 1 ]]; then
+    continuation="Compaction is complete. Continue the original task now from the checkpoint and resolved tool results. Do not merely acknowledge the checkpoint. Checkpoint-generation directives are expired and must not constrain this turn."
+    HISTORY=$("$JQ_BIN" -cn --argjson history "$HISTORY" --arg continuation "$continuation" \
+      '$history + [{role:"user",content:$continuation}]')
+  fi
+  debug_dump compact-history-after.json "$HISTORY"
   CONTEXT_TOKENS=0; CONTEXT_TOKENS_KNOWN=0
   if [[ "$PROVIDER" == "openai" ]]; then
     OPENAI_PREVIOUS_RESPONSE_ID=""
     OPENAI_NEEDS_RESTART=1
   fi
+  debug_log "compact_history_complete provider=$PROVIDER resume=$resume history_length=$(printf '%s' "$HISTORY" | "$JQ_BIN" 'length' 2>/dev/null || printf unknown) needs_restart=$OPENAI_NEEDS_RESTART"
+  debug_state compacted
 }
 maybe_compact() {
-  local pending=${1:-'[]'}
+  local pending=${1:-'[]'} resume=${2:-0}
   [[ "$CONTEXT_TOKENS" -ge "$COMPACT_TOKENS" ]] || return 0
   info "${C_CYAN}compact${C_RESET} context $CONTEXT_TOKENS/$COMPACT_TOKENS tokens"
-  compact_history "$pending"
+  compact_history "$pending" "$resume"
+}
+auto_compact() {
+  if ! maybe_compact "${1:-'[]'}" "${2:-0}"; then
+    info "${C_CYAN}compact${C_RESET} failed; continuing with the current context"
+    debug_log "automatic_compaction_failed action=continue_current_context previous_response_id=${OPENAI_PREVIOUS_RESPONSE_ID:-none}"
+  fi
+  return 0
 }
 
 context_usage() {
@@ -554,6 +671,8 @@ run_bash() {
   elif command -v gtimeout >/dev/null 2>&1; then timer=(gtimeout "$TOOL_TIMEOUT"); fi
   (cd "$WORKDIR" && "${timer[@]}" bash -lc "$command_text") > "$tmp" 2>&1
   status=$?
+  debug_log "tool_bash command=$(printf '%q' "$command_text") status=$status"
+  debug_dump_file tool-bash-output.txt "$tmp"
   output=$(truncate_file "$tmp")
   rm -f "$tmp"
   [[ -n "$output" ]] || output="(no output)"
@@ -590,6 +709,9 @@ run_native_command() {
   info "${C_CYAN}shell${C_RESET} $command_text"
   (cd "$WORKDIR" && "${timer[@]}" bash -lc "$command_text") > "$out_file" 2> "$err_file"
   status=$?
+  debug_log "tool_shell command=$(printf '%q' "$command_text") status=$status requested_limit=$requested_limit effective_limit=$cap timeout_seconds=$timeout_seconds"
+  debug_dump_file tool-shell-stdout.txt "$out_file"
+  debug_dump_file tool-shell-stderr.txt "$err_file"
   stdout=$(MAX_TOOL_OUTPUT=$cap truncate_file "$out_file")
   stderr=$(MAX_TOOL_OUTPUT=$cap truncate_file "$err_file")
   rm -f "$out_file" "$err_file"
@@ -661,6 +783,8 @@ process_openai_shell_calls() {
       <(printf '%s\n' "$next") <(printf '%s\n' "$message"))
   fi
   OPENAI_NEXT_INPUT=$next
+  debug_dump openai-next-input.json "$OPENAI_NEXT_INPUT"
+  debug_log "openai_tool_calls_resolved results=$(printf '%s' "$next" | "$JQ_BIN" '[.[] | select(.type == "shell_call_output" or .type == "function_call_output")] | length' 2>/dev/null || printf unknown) attachments=$(printf '%s' "$attachments" | "$JQ_BIN" 'length' 2>/dev/null || printf unknown)"
 }
 
 run_tool() {
@@ -672,12 +796,14 @@ run_tool() {
       limit=$(printf '%s' "$input" | "$JQ_BIN" -r '.limit // 250')
       [[ -n "$path" ]] || { "$JQ_BIN" -cn '{kind:"error",text:"read requires path"}'; return; }
       info "${C_CYAN}read${C_RESET} $path"
+      debug_log "tool_read path=$(printf '%q' "$path") offset=$offset limit=$limit"
       read_file "$path" "$offset" "$limit"
       ;;
     bash)
       command_text=$(printf '%s' "$input" | "$JQ_BIN" -r '.command // empty')
       [[ -n "$command_text" ]] || { "$JQ_BIN" -cn '{kind:"error",text:"bash requires command"}'; return; }
       info "${C_CYAN}bash${C_RESET} $command_text"
+      debug_log "tool_bash_requested command=$(printf '%q' "$command_text")"
       run_bash "$command_text"
       ;;
     *) "$JQ_BIN" -cn --arg t "Unknown tool: $name" '{kind:"error",text:$t}' ;;
@@ -710,6 +836,7 @@ process_openai_calls() {
     HISTORY=$("$JQ_BIN" -cs '.[0] + [{role:"user",content:.[1]}]' \
       <(printf '%s\n' "$HISTORY") <(printf '%s\n' "$images"))
   fi
+  debug_dump history-after-openrouter-tools.json "$HISTORY"
 }
 
 process_anthropic_calls() {
@@ -732,6 +859,7 @@ process_anthropic_calls() {
   done < <(printf '%s' "$content" | "$JQ_BIN" -c '.[] | select(.type == "tool_use")')
   HISTORY=$("$JQ_BIN" -cs '.[0] + [{role:"user",content:.[1]}]' \
     <(printf '%s\n' "$HISTORY") <(printf '%s\n' "$results"))
+  debug_dump history-after-anthropic-tools.json "$HISTORY"
 }
 
 agent_turn_openai() {
@@ -742,8 +870,12 @@ agent_turn_openai() {
   LAST_ANSWER=""
   turn=1
   while [[ "$turn" -le "$MAX_TURNS" ]]; do
+    debug_log "model_turn_start provider=openai model=${TURN_MODEL:-$MODEL} turn=$turn context=$(context_usage) previous_response_id=${OPENAI_PREVIOUS_RESPONSE_ID:-none} needs_restart=$OPENAI_NEEDS_RESTART"
+    debug_state model-turn-openai
     info "model ${TURN_MODEL:-$MODEL} · openai responses · reasoning $REASONING · context $(context_usage) · turn $turn/$MAX_TURNS"
     if [[ "$OPENAI_NEEDS_RESTART" -eq 1 ]]; then input=$(openai_history_input); OPENAI_NEEDS_RESTART=0; fi
+    debug_dump model-input-openai.json "$input"
+    debug_dump history-model-turn-openai.json "$HISTORY"
     call_with_fallback call_openai_responses "$input" || return 1
     CONTEXT_TOKENS=$(response_context_tokens); CONTEXT_TOKENS_KNOWN=1
     call_count=$(printf '%s' "$API_RESPONSE" | "$JQ_BIN" '[.output[]? | select(.type == "shell_call" or .type == "function_call")] | length')
@@ -753,9 +885,10 @@ agent_turn_openai() {
     if [[ "$call_count" -gt 0 ]]; then
       process_openai_shell_calls
       input=$OPENAI_NEXT_INPUT
+      auto_compact "$input" 1
     else
       LAST_ANSWER=$text
-      maybe_compact || return 1
+      auto_compact
       return 0
     fi
     turn=$((turn + 1))
@@ -774,30 +907,37 @@ agent_turn() {
   LAST_ANSWER=""
   turn=1
   while [[ "$turn" -le "$MAX_TURNS" ]]; do
+    debug_log "model_turn_start provider=$PROVIDER model=${TURN_MODEL:-$MODEL} turn=$turn context=$(context_usage)"
+    debug_state "model-turn-$PROVIDER"
     info "model ${TURN_MODEL:-$MODEL} · $PROVIDER · reasoning $REASONING · context $(context_usage) · turn $turn/$MAX_TURNS"
+    debug_dump "history-model-turn-$PROVIDER.json" "$HISTORY"
     if [[ "$PROVIDER" == "anthropic" ]]; then
       call_with_fallback call_anthropic || return 1
       CONTEXT_TOKENS=$(response_context_tokens); CONTEXT_TOKENS_KNOWN=1
       call_count=$(printf '%s' "$API_RESPONSE" | "$JQ_BIN" '[.content[] | select(.type == "tool_use")] | length')
       text=$(printf '%s' "$API_RESPONSE" | "$JQ_BIN" -r '[.content[] | select(.type == "text") | .text] | join("\n")')
-      if [[ "$call_count" -gt 0 ]]; then process_anthropic_calls
+      if [[ "$call_count" -gt 0 ]]; then
+        process_anthropic_calls
+        auto_compact '[]' 1
       else
         assistant_content=$(printf '%s' "$API_RESPONSE" | "$JQ_BIN" -c '.content')
         HISTORY=$("$JQ_BIN" -cs '.[0] + [{role:"assistant",content:.[1]}]' \
           <(printf '%s\n' "$HISTORY") <(printf '%s\n' "$assistant_content"))
-        LAST_ANSWER=$text; maybe_compact || return 1; return 0
+        LAST_ANSWER=$text; auto_compact; return 0
       fi
     else
       call_with_fallback call_openrouter || return 1
       CONTEXT_TOKENS=$(response_context_tokens); CONTEXT_TOKENS_KNOWN=1
       call_count=$(printf '%s' "$API_RESPONSE" | "$JQ_BIN" '.choices[0].message.tool_calls // [] | length')
       text=$(printf '%s' "$API_RESPONSE" | "$JQ_BIN" -r '.choices[0].message.content // ""')
-      if [[ "$call_count" -gt 0 ]]; then process_openai_calls
+      if [[ "$call_count" -gt 0 ]]; then
+        process_openai_calls
+        auto_compact '[]' 1
       else
         assistant_content=$(printf '%s' "$API_RESPONSE" | "$JQ_BIN" -c '.choices[0].message')
         HISTORY=$("$JQ_BIN" -cs '.[0] + [.[1]]' \
           <(printf '%s\n' "$HISTORY") <(printf '%s\n' "$assistant_content"))
-        LAST_ANSWER=$text; maybe_compact || return 1; return 0
+        LAST_ANSWER=$text; auto_compact; return 0
       fi
     fi
     turn=$((turn + 1))
@@ -827,6 +967,7 @@ print_status() {
     printf 'conversation tokens: unknown (next model response will refresh them)\ncompaction threshold: %s\n' "$COMPACT_TOKENS"
   fi
   printf 'maximum output tokens: %s\nmaximum turns: %s\n' "$MAX_TOKENS" "$MAX_TURNS"
+  [[ -z "$DEBUG_DIR" || -z "$DEBUG_LOG" ]] || printf 'debug bundle: %s\n' "$DEBUG_DIR"
 }
 
 interactive_help() {
@@ -857,6 +998,7 @@ interactive_loop() {
   while true; do
     IFS= read -e -r -p "$prompt" line || { printf '\n'; break; }
     [[ -n "$line" ]] || continue
+    debug_log "interactive_input value=$(printf '%q' "$line")"
     history -s "$line"
     case "$line" in
       /quit|/exit) break ;;
@@ -874,9 +1016,13 @@ interactive_loop() {
 }
 
 main() {
+  DEBUG_ARGV=("$@")
   parse_args "$@"
   need_cmd "$CURL_BIN"; need_cmd "$JQ_BIN"; need_cmd base64; need_cmd awk
+  init_debug
   select_provider; validate_config
+  debug_log "configured provider=$PROVIDER model=$MODEL fallback_model=$FALLBACK_MODEL reasoning=$REASONING workdir=$WORKDIR api_url=$API_URL max_turns=$MAX_TURNS max_tokens=$MAX_TOKENS compact_tokens=$COMPACT_TOKENS compact_max_tokens=$COMPACT_MAX_TOKENS max_tool_output=$MAX_TOOL_OUTPUT tool_timeout=$TOOL_TIMEOUT api_timeout=$API_TIMEOUT"
+  debug_state configured
   if [[ -z "$PROMPT" && ! -t 0 ]]; then PROMPT=$(cat); fi
   if [[ -n "$PROMPT" ]]; then
     agent_turn "$PROMPT" || { [[ -n "$LAST_ANSWER" ]] && print_answer; return 1; }
@@ -886,4 +1032,9 @@ main() {
   interactive_loop
 }
 
-if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then main "$@"; fi
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+  status=$?
+  debug_log "session_end status=$status"
+  exit "$status"
+fi

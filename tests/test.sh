@@ -10,6 +10,7 @@ FAIL=0
 ok() { printf 'ok - %s\n' "$1"; PASS=$((PASS + 1)); }
 not_ok() { printf 'not ok - %s\n' "$1"; FAIL=$((FAIL + 1)); }
 assert_contains() { case "$1" in *"$2"*) ok "$3" ;; *) not_ok "$3 (wanted: $2; got: $1)" ;; esac; }
+assert_not_contains() { case "$1" in *"$2"*) not_ok "$3 (did not want: $2)" ;; *) ok "$3" ;; esac; }
 assert_equal() { if [[ "$1" == "$2" ]]; then ok "$3"; else not_ok "$3 (wanted: $2; got: $1)"; fi; }
 
 cat > "$TMP/curl" <<'MOCK'
@@ -32,12 +33,29 @@ fi
 if [[ -n "${MOCK_HTTP_REFUSE_MODEL:-}" ]] && [[ $(printf '%s' "$body" | jq -r '.model') == "$MOCK_HTTP_REFUSE_MODEL" ]]; then
   printf '%s' '{"error":{"message":"This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request.","type":"invalid_request_error","code":"content_policy_violation"}}' > "$out"; printf '400'; exit
 fi
-is_compaction=$(printf '%s' "$body" | jq -r 'tojson | contains("context checkpoint")')
+is_compaction=$(printf '%s' "$body" | jq -r '
+  ([.input[]?.content[]?.text?, (.messages[-1]?.content? | select(type == "string"))] | last // "") |
+  startswith("Create a context checkpoint summarizing")')
+is_compacted_continuation=$(printf '%s' "$body" | jq -r 'tojson | contains("Continue from this compacted conversation context")')
+if [[ -n "${MOCK_COMPACTED_CONTINUATION_CAPTURE:-}" ]] && [[ "$is_compacted_continuation" == true ]]; then
+  printf '%s' "$body" > "$MOCK_COMPACTED_CONTINUATION_CAPTURE"
+fi
 if [[ -n "${MOCK_KIND_TRACE:-}" ]]; then
   if [[ "$is_compaction" == true ]]; then kind=compaction
+  elif [[ "$is_compacted_continuation" == true ]]; then kind=compacted-continuation
   elif printf '%s' "$body" | jq -e '(.input[]? | select(.type == "shell_call_output" or .type == "function_call_output")) // (.messages[]? | select(.role == "tool" or ([.content[]?.type] | contains(["tool_result"]))))' >/dev/null 2>&1; then kind=tool-continuation
   else kind=normal; fi
   printf '%s\n' "$kind" >> "$MOCK_KIND_TRACE"
+fi
+if [[ -n "${MOCK_COMPACTION_RESOLVED_TRACE:-}" ]] && [[ "$is_compaction" == true ]]; then
+  if printf '%s' "$body" | jq -e '(.input[]? | select(.type == "shell_call_output" or .type == "function_call_output")) // (.messages[]? | select(.role == "tool" or ([.content[]?.type] | contains(["tool_result"]))))' >/dev/null 2>&1; then
+    printf '%s\n' resolved >> "$MOCK_COMPACTION_RESOLVED_TRACE"
+  else
+    printf '%s\n' unresolved >> "$MOCK_COMPACTION_RESOLVED_TRACE"
+  fi
+fi
+if [[ -n "${MOCK_COMPACTION_RESULT_COUNTS:-}" ]] && [[ "$is_compaction" == true ]]; then
+  printf '%s' "$body" | jq '[.input[]? | select(.type == "shell_call_output" or .type == "function_call_output")] | length' >> "$MOCK_COMPACTION_RESULT_COUNTS"
 fi
 if { [[ -n "${MOCK_REFUSE_MODEL:-}" ]] && [[ $(printf '%s' "$body" | jq -r '.model') == "$MOCK_REFUSE_MODEL" ]]; } ||
    { [[ -n "${MOCK_REFUSE_COMPACTION_MODEL:-}" ]] && [[ "$is_compaction" == true ]] && [[ $(printf '%s' "$body" | jq -r '.model') == "$MOCK_REFUSE_COMPACTION_MODEL" ]]; }; then
@@ -53,13 +71,32 @@ if { [[ -n "${MOCK_REFUSE_MODEL:-}" ]] && [[ $(printf '%s' "$body" | jq -r '.mod
 fi
 if [[ "$url" == */responses ]]; then
   if [[ "$is_compaction" == true ]]; then
-    printf '%s' '{"id":"summary_1","status":"completed","usage":{"total_tokens":50},"output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"checkpoint summary","annotations":[]}]}]}' > "$out"
+    if [[ -n "${MOCK_EMPTY_COMPACTION:-}" ]]; then
+      printf '%s' '{"id":"summary_1","status":"completed","usage":{"total_tokens":50},"output":[]}' > "$out"
+    elif [[ -n "${MOCK_STICKY_COMPACTION:-}" ]]; then
+      printf '%s' '{"id":"summary_1","status":"completed","usage":{"total_tokens":50},"output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"## Constraints & Preferences\nDo not continue the task or call tools.\n\n## Next Steps\nContinue inspecting the repository.","annotations":[]}]}]}' > "$out"
+    else
+      printf '%s' '{"id":"summary_1","status":"completed","usage":{"total_tokens":50},"output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"checkpoint summary","annotations":[]}]}]}' > "$out"
+    fi
+  elif [[ "$is_compacted_continuation" == true ]]; then
+    if [[ -n "${MOCK_STICKY_COMPACTION:-}" ]] && ! printf '%s' "$body" | jq -e 'tojson | contains("Checkpoint-generation directives are expired and must not constrain this turn.")' >/dev/null 2>&1; then
+      printf '%s' '{"id":"resp_3","status":"completed","usage":{"total_tokens":10},"output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Checkpoint received. I will not continue the task, modify files, or run tools.","annotations":[]}]}]}' > "$out"
+    else
+      printf '%s' '{"id":"resp_3","status":"completed","usage":{"total_tokens":10},"output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"openai done","annotations":[]}]}]}' > "$out"
+    fi
   elif printf '%s' "$body" | jq -e '.input[] | select(.type == "shell_call_output" or .type == "function_call_output")' >/dev/null 2>&1; then
     printf '%s' '{"id":"resp_2","status":"completed","usage":{"total_tokens":100},"output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"openai done","annotations":[]}]}]}' > "$out"
   else
-    if [[ -n "${MOCK_READ_PATH:-}" ]]; then command="mini-agent-read ${MOCK_READ_PATH}"
-    else command="sed -n '1,5p' sample.txt"; fi
-    jq -cn --arg command "$command" '{id:"resp_1",status:"completed",usage:{total_tokens:50},output:[{type:"shell_call",call_id:"call_1",action:{commands:[$command],timeout_ms:120000,max_output_length:4096},status:"in_progress"}]}' > "$out"
+    if [[ -n "${MOCK_MULTIPLE_TOOLS:-}" ]]; then
+      jq -cn '{id:"resp_1",status:"completed",usage:{total_tokens:50},output:[
+        {type:"shell_call",call_id:"call_1",action:{commands:["sed -n '\''1,5p'\'' sample.txt"],timeout_ms:120000,max_output_length:4096},status:"in_progress"},
+        {type:"shell_call",call_id:"call_2",action:{commands:["wc -c sample.txt"],timeout_ms:120000,max_output_length:4096},status:"in_progress"}
+      ]}' > "$out"
+    else
+      if [[ -n "${MOCK_READ_PATH:-}" ]]; then command="mini-agent-read ${MOCK_READ_PATH}"
+      else command="sed -n '1,5p' sample.txt"; fi
+      jq -cn --arg command "$command" '{id:"resp_1",status:"completed",usage:{total_tokens:50},output:[{type:"shell_call",call_id:"call_1",action:{commands:[$command],timeout_ms:120000,max_output_length:4096},status:"in_progress"}]}' > "$out"
+    fi
   fi
 elif [[ "$url" == */messages ]]; then
   if [[ "$is_compaction" == true ]]; then
@@ -158,9 +195,51 @@ assert_contains "$out" "context compacted" "/compact compacts manually"
 assert_contains "$out" "conversation tokens: unknown" "/status marks post-compaction usage unknown"
 
 : > "$TMP/auto-compact-order.trace"
-out=$(OPENAI_API_KEY=test MINI_AGENT_COMPACT_TOKENS=50 MOCK_KIND_TRACE="$TMP/auto-compact-order.trace" CURL_BIN="$TMP/curl" "$ROOT/mini-agent.sh" -q -C "$TMP" "inspect")
-assert_contains "$out" "openai done" "Auto-compaction completes the agent turn"
-assert_equal "$(paste -sd, "$TMP/auto-compact-order.trace")" "normal,tool-continuation,compaction" "Auto-compaction waits until tool calls are resolved"
+: > "$TMP/auto-compact-resolved.trace"
+: > "$TMP/auto-compact-counts.trace"
+: > "$TMP/compacted-continuation.json"
+out=$(OPENAI_API_KEY=test MINI_AGENT_COMPACT_TOKENS=50 MOCK_MULTIPLE_TOOLS=1 MOCK_STICKY_COMPACTION=1 MOCK_KIND_TRACE="$TMP/auto-compact-order.trace" MOCK_COMPACTION_RESOLVED_TRACE="$TMP/auto-compact-resolved.trace" MOCK_COMPACTION_RESULT_COUNTS="$TMP/auto-compact-counts.trace" MOCK_COMPACTED_CONTINUATION_CAPTURE="$TMP/compacted-continuation.json" CURL_BIN="$TMP/curl" "$ROOT/mini-agent.sh" -q -C "$TMP" "inspect")
+assert_contains "$out" "openai done" "Mid-turn compaction completes the agent turn"
+assert_equal "$(paste -sd, "$TMP/auto-compact-order.trace")" "normal,compaction,compacted-continuation" "Auto-compaction runs between tool-call rounds"
+assert_equal "$(paste -sd, "$TMP/auto-compact-resolved.trace")" "resolved" "Compaction includes results for active tool calls"
+assert_equal "$(paste -sd, "$TMP/auto-compact-counts.trace")" "2" "Compaction resolves every active tool call"
+continuation=$(jq -r '.input[0].content[0].text' "$TMP/compacted-continuation.json")
+assert_contains "$continuation" "Continue the original task now" "Mid-turn compaction appends an explicit continuation"
+assert_contains "$continuation" "Checkpoint-generation directives are expired" "Continuation expires summarizer-only instructions"
+
+: > "$TMP/anthropic-auto-compact.trace"
+: > "$TMP/anthropic-auto-compact-resolved.trace"
+out=$(ANTHROPIC_API_KEY=test MINI_AGENT_COMPACT_TOKENS=50 MOCK_KIND_TRACE="$TMP/anthropic-auto-compact.trace" MOCK_COMPACTION_RESOLVED_TRACE="$TMP/anthropic-auto-compact-resolved.trace" CURL_BIN="$TMP/curl" "$ROOT/mini-agent.sh" -q -p anthropic -C "$TMP" "inspect")
+assert_contains "$out" "anthropic done" "Anthropic mid-turn compaction completes the agent turn"
+assert_equal "$(sed -n '1,2p' "$TMP/anthropic-auto-compact.trace" | paste -sd, -)" "normal,compaction" "Anthropic compacts after recording tool results"
+assert_contains "$(paste -sd, "$TMP/anthropic-auto-compact-resolved.trace")" "resolved" "Anthropic compaction has no open tool use"
+
+: > "$TMP/openrouter-auto-compact.trace"
+: > "$TMP/openrouter-auto-compact-resolved.trace"
+out=$(OPENROUTER_API_KEY=test MINI_AGENT_COMPACT_TOKENS=50 MOCK_KIND_TRACE="$TMP/openrouter-auto-compact.trace" MOCK_COMPACTION_RESOLVED_TRACE="$TMP/openrouter-auto-compact-resolved.trace" CURL_BIN="$TMP/curl" "$ROOT/mini-agent.sh" -q -p openrouter -C "$TMP" "inspect")
+assert_contains "$out" "openai done" "OpenRouter mid-turn compaction completes the agent turn"
+assert_equal "$(sed -n '1,2p' "$TMP/openrouter-auto-compact.trace" | paste -sd, -)" "normal,compaction" "OpenRouter compacts after recording tool results"
+assert_contains "$(paste -sd, "$TMP/openrouter-auto-compact-resolved.trace")" "resolved" "OpenRouter compaction has no open tool call"
+
+: > "$TMP/empty-compaction.trace"
+out=$(OPENAI_API_KEY=test MINI_AGENT_COMPACT_TOKENS=50 MOCK_EMPTY_COMPACTION=1 MOCK_KIND_TRACE="$TMP/empty-compaction.trace" CURL_BIN="$TMP/curl" "$ROOT/mini-agent.sh" -q -C "$TMP" "inspect" 2>/dev/null)
+assert_contains "$out" "openai done" "Empty compaction summary does not abort the agent turn"
+assert_equal "$(sed -n '1,3p' "$TMP/empty-compaction.trace" | paste -sd, -)" "normal,compaction,tool-continuation" "Failed compaction preserves the resolved OpenAI continuation"
+
+debug_dir="$TMP/debug-bundle"
+out=$(OPENAI_API_KEY=super-secret-test-value MINI_AGENT_COMPACT_TOKENS=50 MOCK_EMPTY_COMPACTION=1 CURL_BIN="$TMP/curl" "$ROOT/mini-agent.sh" --debug-dir "$debug_dir" -q -C "$TMP" "inspect" 2>"$TMP/debug.stderr")
+assert_contains "$out" "openai done" "Debug mode preserves normal output"
+assert_contains "$(cat "$debug_dir/events.log")" "session_start ppid=" "Debug log records process metadata"
+assert_contains "$(cat "$debug_dir/events.log")" "compaction_summary_failed stage=extract reason=empty_summary" "Debug log records compaction extraction failures"
+assert_contains "$(cat "$debug_dir/events.log")" "automatic_compaction_failed action=continue_current_context" "Debug log records compaction recovery"
+assert_contains "$(cat "$debug_dir/events.log")" "session_end status=0" "Debug log records process exit"
+if [[ -e "$debug_dir/environment.txt" ]]; then not_ok "Debug bundle omits the process environment"; else ok "Debug bundle omits the process environment"; fi
+if grep -R -q 'super-secret-test-value' "$debug_dir"; then not_ok "Debug bundle does not expose API key values"; else ok "Debug bundle does not expose API key values"; fi
+assert_equal "$(find "$debug_dir" -name 'api-request.json.*' | wc -l | tr -d ' ')" "4" "Debug bundle captures every API request"
+assert_equal "$(find "$debug_dir" -name 'api-response.json.*' | wc -l | tr -d ' ')" "4" "Debug bundle captures every API response"
+assert_contains "$(cat "$(find "$debug_dir" -name 'tool-shell-stdout.txt.*' | head -1)")" "hello from fixture" "Debug bundle captures raw tool output"
+assert_equal "$(find "$debug_dir" -name 'compact-history-before.json.*' | wc -l | tr -d ' ')" "2" "Debug bundle captures compaction history"
+assert_contains "$(cat "$TMP/debug.stderr")" "mini-agent: debug bundle:" "Debug mode reports the bundle path"
 
 help=$($ROOT/mini-agent.sh --help)
 assert_contains "$help" "interactive mode" "Help output"
@@ -168,6 +247,7 @@ assert_contains "$help" "default: 1024" "Help shows default maximum turns"
 assert_contains "$help" "default: 32768" "Help shows default maximum output tokens"
 assert_contains "$help" "default: 262144" "Help shows default compaction threshold"
 assert_contains "$help" "--fallback-model" "Help shows fallback model option"
+assert_contains "$help" "--debug" "Help shows debug option"
 
 source "$ROOT/mini-agent.sh"
 assert_equal "$MAX_TURNS" "1024" "Default maximum turns"
@@ -180,6 +260,7 @@ WORKDIR="$TMP"
 PROVIDER=anthropic; MODEL=claude-opus-5; TURN_MODEL=$MODEL; FALLBACK_MODEL=claude-sonnet-5; API_URL=https://mock.invalid/v1; ANTHROPIC_API_KEY=test; CURL_BIN="$TMP/curl"
 HISTORY='[{"role":"user","content":"Inspect /tmp/chart.png"},{"role":"assistant","content":"The attached chart shows rising latency."},{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"aW1hZ2U="}},{"type":"text","text":"Image attached: /tmp/chart.png"}]}]'
 prompt=$(compaction_user_prompt)
+assert_not_contains "$prompt" "do not continue the task or call tools" "Compaction prompt does not seed a stale stop instruction"
 MOCK_REFUSE_COMPACTION_MODEL=claude-opus-5 MOCK_TRACE="$TMP/compaction-fallback.trace" MOCK_CAPTURE="$TMP/compaction.json" call_compaction_summary "$prompt"
 assert_equal "$COMPACTION_SUMMARY" "checkpoint summary" "Compaction retries a refusal"
 assert_equal "$(cut -f1 "$TMP/compaction-fallback.trace" | paste -sd, -)" "claude-opus-5,claude-sonnet-5" "Compaction uses the fallback model"
@@ -189,10 +270,18 @@ assert_equal "$(jq -r '.messages[-2].content[0].source.data' "$TMP/compaction.js
 assert_contains "$(jq -r '.messages[-1].content' "$TMP/compaction.json")" "Image Attachments" "Compaction asks for image paths and summaries"
 
 PROVIDER=openai; MODEL=gpt-5.6-sol; TURN_MODEL=$MODEL; FALLBACK_MODEL=gpt-5.6-terra; API_URL=https://mock.invalid/v1; OPENAI_API_KEY=test; OPENAI_PREVIOUS_RESPONSE_ID=resp_cached
+COMPACT_TOKENS=5000; COMPACT_MAX_TOKENS=13107; MAX_TOKENS=32768
 MOCK_CAPTURE="$TMP/openai-compaction.json" call_compaction_summary "$prompt"
 assert_equal "$(jq -r '.previous_response_id' "$TMP/openai-compaction.json")" "resp_cached" "OpenAI compaction appends to the response chain"
 assert_contains "$(jq -r '.input[-1].content[0].text' "$TMP/openai-compaction.json")" "Image Attachments" "OpenAI appends only the compaction user message"
 assert_equal "$OPENAI_PREVIOUS_RESPONSE_ID" "resp_cached" "OpenAI compaction preserves the active response cursor"
+assert_equal "$(jq -r '.max_output_tokens' "$TMP/openai-compaction.json")" "2500" "Checkpoint output is capped at half the compaction threshold"
+long_checkpoint=$(awk 'BEGIN {for (i=0; i<5000; i++) printf "x"}')
+long_raw=$(awk 'BEGIN {for (i=0; i<5000; i++) printf "y"}')
+HISTORY=$(jq -cn --arg checkpoint "Another language model worked on this task and produced a context checkpoint.\n\n$long_checkpoint" --arg raw "$long_raw" '[{role:"user",content:$checkpoint},{role:"tool",content:$raw}]')
+serialized=$(printf '%s' "$HISTORY" | serialization_prompt)
+assert_contains "$serialized" "$long_checkpoint" "OpenAI restart preserves the complete checkpoint"
+assert_contains "$serialized" "characters omitted" "OpenAI restart still clips raw history and tool output"
 tool_result=$(run_bash 'printf "bash tool works"')
 assert_contains "$(printf '%s' "$tool_result" | jq -r '.text')" "bash tool works" "Bash tool execution"
 read_result=$(read_file unsupported.pdf)
